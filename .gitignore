@@ -1,0 +1,6 @@
+# build not required
+build/
+
+
+# Ignore SPEC file that is for our reference
+matching-engine-spec.md
