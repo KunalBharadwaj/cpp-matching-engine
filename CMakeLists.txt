@@ -10,3 +10,21 @@ add_executable(engine src/main.cpp)
 
 #Tell the compiler where to find our headers, so '#include <engine/foo.hpp>' works.
 target_include_directories(engine PRIVATE include)
+
+# ---------------Tests---------------
+include(FetchContent)          # enable Cmake's download-a-dependency feature
+FetchContent_Declare(
+    googletest                 # a name that we pick for this dependency
+    GIT_REPOSITORY https://github.com/google/googletest.git
+    GIT_TAG        v1.14.0     # pin an exact version -> reproducible builds
+)
+FetchContent_MakeAvailable(googletest)  # download + build it, expose its targets
+
+enable_testing()               # turn on Cmake's test-runner (ctest)
+
+add_executable(unit_tests tests/test_types.cpp)     # s SECOND executable, just for tests
+target_include_directories(unit_tests PRIVATE include) # so tests can # include
+target_link_libraries(unit_tests PRIVATE GTest::gtest_main)  # link GTest + its default main
+
+include(GoogleTest)            # enable Cmake's GTest integration
+gtest_discover_tests(unit_tests)  # auto-discover tests in the unit_tests executable

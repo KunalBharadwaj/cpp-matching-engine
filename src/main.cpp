@@ -1,7 +1,10 @@
-#include<iostream>
+#include <iostream>
+#include "engine/order.hpp"
 
 int main() {
-    std::cout<<"matching engine: build OK"<<std::endl;
+    Order order;
+    std::cout << "sizeof(Order) = " << sizeof(order) << '\n';
+    std::cout << "matching engine: build OK" << '\n';
 
     return 0;
 }
