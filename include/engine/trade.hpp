@@ -7,5 +7,6 @@ struct Trade {
     OrderId taker {}; // takes away the liquidity
     Price price {};
     Quantity quantity {};
+    bool operator==(const Trade&) const = default;
     // I don't think if we need a side on the trade because trade is basically a deal between two parties/orders ig
 };

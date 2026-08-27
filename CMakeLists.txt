@@ -5,6 +5,13 @@ set(CMAKE_CXX_STANDARD 20)            #set C++ standard to C++ 20
 set(CMAKE_CXX_STANDARD_REQUIRED ON)   #require C++ 20
 set(CMAKE_CXX_EXTENSIONS OFF)         #standard C++20 and not GNU extensions(portable)
 
+option(ENABLE_SANITIZERS "Build with AddressSanitizer + UBSan" OFF)   # off by default
+if(ENABLE_SANITIZERS)
+    add_compile_options(-fsanitize=address,undefined -g -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address,undefined)
+endif()
+
+
 #An executable target named 'engine', built from these source files
 add_executable(engine src/main.cpp)
 
@@ -22,7 +29,7 @@ FetchContent_MakeAvailable(googletest)  # download + build it, expose its target
 
 enable_testing()               # turn on Cmake's test-runner (ctest)
 
-add_executable(unit_tests tests/test_types.cpp)     # s SECOND executable, just for tests
+add_executable(unit_tests tests/test_types.cpp tests/test_order_book.cpp)     # s SECOND executable, just for tests
 target_include_directories(unit_tests PRIVATE include) # so tests can # include
 target_link_libraries(unit_tests PRIVATE GTest::gtest_main)  # link GTest + its default main
 
