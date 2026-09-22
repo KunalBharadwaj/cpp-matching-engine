@@ -25,8 +25,8 @@ TEST(LimitOrder, PartiallyFilledRestingOrder) {
     ExecutionSink& execution_sink = recording_sink;
     OrderBook order_book;
 
-    order_book.processLimitOrder(sell, execution_sink);
-    order_book.processLimitOrder(buy, execution_sink);
+    order_book.process(sell, execution_sink);
+    order_book.process(buy, execution_sink);
 
     ASSERT_EQ(1, recording_sink.trades.size());
     Trade recorded_trade = recording_sink.trades[0];
@@ -65,8 +65,8 @@ TEST(LimitOrder, NoCross) {
     ExecutionSink& execution_sink = recording_sink;
     OrderBook order_book;
 
-    order_book.processLimitOrder(sell, execution_sink);
-    order_book.processLimitOrder(buy, execution_sink);
+    order_book.process(sell, execution_sink);
+    order_book.process(buy, execution_sink);
 
     ASSERT_EQ(0, recording_sink.trades.size());
 
@@ -106,9 +106,9 @@ TEST(MarketOrder, MarketOrderWalksMultipleLevels) {
     ExecutionSink& execution_sink = recording_sink;
     OrderBook order_book;
 
-    order_book.processLimitOrder(sell1, execution_sink);
-    order_book.processLimitOrder(sell2, execution_sink);
-    order_book.processMarketOrder(buy, execution_sink);
+    order_book.process(sell1, execution_sink);
+    order_book.process(sell2, execution_sink);
+    order_book.process(buy, execution_sink);
 
     EXPECT_EQ(2, recording_sink.trades.size());
 
@@ -137,8 +137,8 @@ TEST(MarketOrder, ExactFullFillEmptiesBook) {
     ExecutionSink& execution_sink = recording_sink;
     OrderBook order_book;
 
-    order_book.processLimitOrder(sell, execution_sink);
-    order_book.processMarketOrder(buy, execution_sink);
+    order_book.process(sell, execution_sink);
+    order_book.process(buy, execution_sink);
 
     EXPECT_EQ(1, recording_sink.trades.size());
     EXPECT_EQ(std::nullopt, order_book.getBestAsk());
@@ -158,7 +158,7 @@ TEST(MarketOrder, MarketOrderIntoEmptyBookDoesNothing) {
     ExecutionSink& execution_sink = recording_sink;
     OrderBook order_book;
 
-    order_book.processMarketOrder(buy, execution_sink);
+    order_book.process(buy, execution_sink);
 
     EXPECT_EQ(0, recording_sink.trades.size());
     EXPECT_EQ(std::nullopt, order_book.getBestAsk());
@@ -180,7 +180,7 @@ TEST(CancelOrder, CancelRemovesRestingOrder) {
     ExecutionSink& execution_sink = recording_sink;
     OrderBook order_book;
 
-    order_book.processLimitOrder(sell, execution_sink);
+    order_book.process(sell, execution_sink);
 
     EXPECT_TRUE(order_book.cancelOrder(1));
     EXPECT_EQ(std::nullopt, order_book.getBestAsk());
@@ -208,7 +208,7 @@ TEST(CancelOrder, CancelThenNoTrade) {
     ExecutionSink& execution_sink = recording_sink;
     OrderBook order_book;
 
-    order_book.processLimitOrder(sell, execution_sink);
+    order_book.process(sell, execution_sink);
 
     EXPECT_TRUE(order_book.cancelOrder(1));
 
@@ -221,7 +221,7 @@ TEST(CancelOrder, CancelThenNoTrade) {
         .order_type = OrderType::Limit,
     };
 
-    order_book.processLimitOrder(buy, execution_sink);
+    order_book.process(buy, execution_sink);
 
     EXPECT_EQ(0, recording_sink.trades.size());
     EXPECT_EQ(100, order_book.getBestBid());

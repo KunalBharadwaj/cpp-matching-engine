@@ -1,6 +1,5 @@
 #pragma once
-
-struct Command;
+#include "engine/command.hpp"
 
 class EventSource {
 public:

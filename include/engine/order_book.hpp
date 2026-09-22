@@ -74,11 +74,6 @@ class OrderBook {
         }
     }
 
-    // I guess we can return a vector<Trade> so the async processing of these orders occur out of the hot loop
-    // But there's a catch that the opposite side is completely empty in the starting itself then are we going to return back a Trade or not 
-    // Keeping that in mind it seems that it is better to take a ExecutionSink object via reference and then call on_tade or on_exec, etc. 
-
-public:
     void processLimitOrder(Order& order, ExecutionSink& execution_sink) {
         processOrder(order, execution_sink, order.price, true);
     }
@@ -86,6 +81,16 @@ public:
     void processMarketOrder(Order& order, ExecutionSink& execution_sink) {
         Price aggressive = (order.side == Side::Buy) ? std::numeric_limits<Price>::max() : std::numeric_limits<Price>::min();
         processOrder(order, execution_sink, aggressive, false);
+    }
+    // I guess we can return a vector<Trade> so the async processing of these orders occur out of the hot loop
+    // But there's a catch that the opposite side is completely empty in the starting itself then are we going to return back a Trade or not 
+    // Keeping that in mind it seems that it is better to take a ExecutionSink object via reference and then call on_tade or on_exec, etc. 
+
+public:
+
+    void process(Order& order, ExecutionSink& execution_sink) {
+        if(order.order_type == OrderType::Limit) processLimitOrder(order, execution_sink);
+        else if(order.order_type == OrderType::Market) processMarketOrder(order, execution_sink);
     }
 
     std::optional<Price> getBestBid() const {
