@@ -11,12 +11,24 @@ if(ENABLE_SANITIZERS)
     add_link_options(-fsanitize=address,undefined)
 endif()
 
+# Default to an optimized build so `bench` numbers mean something when no
+# build type is passed (benchmarks must never run at -O0).
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+
 
 #An executable target named 'engine', built from these source files
 add_executable(engine src/main.cpp)
 
 #Tell the compiler where to find our headers, so '#include <engine/foo.hpp>' works.
 target_include_directories(engine PRIVATE include)
+
+# ---------------Benchmark (Phase 4)---------------
+# Release-optimized, assertions off. Not a test target; run it by hand.
+add_executable(bench benchmarks/bench_order_book.cpp)
+target_include_directories(bench PRIVATE include)
+target_compile_options(bench PRIVATE -O3 -DNDEBUG)
 
 # ---------------Tests---------------
 include(FetchContent)          # enable Cmake's download-a-dependency feature
