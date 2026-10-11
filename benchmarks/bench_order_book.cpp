@@ -64,10 +64,13 @@ static inline std::uint64_t to_ns(std::uint64_t ns) { return ns; }  // already n
 #endif
 
 // Busy-spin a fixed wall interval and divide elapsed TSC ticks by elapsed ns.
+// 20 ms is ~50M ticks at a few GHz -- accurate to well under 0.1% -- while
+// keeping the spin out of the way of a whole-process `perf stat` (a longer
+// window would dominate the counters and swamp the per-book matching work).
 static void calibrate_tsc() {
 #if HAVE_RDTSC
     auto c0 = Clock::now(); std::uint64_t t0 = tsc_begin();
-    while (std::chrono::duration<double>(Clock::now() - c0).count() < 0.20) { /* spin */ }
+    while (std::chrono::duration<double>(Clock::now() - c0).count() < 0.02) { /* spin */ }
     std::uint64_t t1 = tsc_end(); auto c1 = Clock::now();
     double ns = std::chrono::duration<double, std::nano>(c1 - c0).count();
     g_ticks_per_ns = static_cast<double>(t1 - t0) / ns;
