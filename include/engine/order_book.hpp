@@ -82,6 +82,33 @@ class OrderBook {
         Price aggressive = (order.side == Side::Buy) ? std::numeric_limits<Price>::max() : std::numeric_limits<Price>::min();
         processOrder(order, execution_sink, aggressive, false);
     }
+
+    // FOK pre-check: is there enough resting liquidity, at prices that cross
+    // the order's limit, to fill it completely right now? Walks the opposite
+    // side summing quantity, stopping early once we have enough or run past
+    // the limit price.
+    bool canFullyFill(const Order& order) const {
+        Quantity need = order.remaining_quantity;
+        Quantity avail = 0;
+        if (order.side == Side::Buy) {
+            for (const auto& [price, queue] : ask) {       // ascending
+                if (price > order.price) break;
+                for (const Order& maker : queue) {
+                    avail += maker.remaining_quantity;
+                    if (avail >= need) return true;
+                }
+            }
+        } else {
+            for (const auto& [price, queue] : bid) {       // descending
+                if (price < order.price) break;
+                for (const Order& maker : queue) {
+                    avail += maker.remaining_quantity;
+                    if (avail >= need) return true;
+                }
+            }
+        }
+        return avail >= need;
+    }
     // I guess we can return a vector<Trade> so the async processing of these orders occur out of the hot loop
     // But there's a catch that the opposite side is completely empty in the starting itself then are we going to return back a Trade or not 
     // Keeping that in mind it seems that it is better to take a ExecutionSink object via reference and then call on_tade or on_exec, etc. 
@@ -89,8 +116,20 @@ class OrderBook {
 public:
 
     void process(Order& order, ExecutionSink& execution_sink) {
-        if(order.order_type == OrderType::Limit) processLimitOrder(order, execution_sink);
-        else if(order.order_type == OrderType::Market) processMarketOrder(order, execution_sink);
+        if(order.order_type == OrderType::Market) { processMarketOrder(order, execution_sink); return; }
+        // Limit order: time-in-force decides what happens to the remainder.
+        switch(order.time_in_force) {
+            case TimeInForce::GTC:
+                processOrder(order, execution_sink, order.price, true);   // rest remainder
+                break;
+            case TimeInForce::IOC:
+                processOrder(order, execution_sink, order.price, false);  // drop remainder
+                break;
+            case TimeInForce::FOK:
+                if(canFullyFill(order))
+                    processOrder(order, execution_sink, order.price, false);  // all-or-nothing
+                break;
+        }
     }
 
     std::optional<Price> getBestBid() const {

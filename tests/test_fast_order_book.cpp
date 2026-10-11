@@ -129,6 +129,67 @@ void applyAndCompare(Order order,
 }
 }  // namespace
 
+TEST(FastOrderBook, IocFillsThenDropsRemainder) {
+    Order sell{ .order_id = 1, .price = 100, .original_quantity = 4,
+                .remaining_quantity = 4, .side = Side::Sell, .order_type = OrderType::Limit };
+    Order buy{ .order_id = 2, .price = 100, .original_quantity = 10,
+               .remaining_quantity = 10, .side = Side::Buy, .order_type = OrderType::Limit,
+               .time_in_force = TimeInForce::IOC };
+
+    RecordingSink sink;
+    ExecutionSink& es = sink;
+    FastOrderBook book(MIN, MAX, TICK);
+
+    book.process(sell, es);
+    book.process(buy, es);
+
+    ASSERT_EQ(1u, sink.trades.size());
+    EXPECT_EQ(4u, sink.trades[0].quantity);
+    EXPECT_EQ(std::nullopt, book.getBestBid());  // 6 unfilled were dropped, not rested
+    EXPECT_EQ(std::nullopt, book.getBestAsk());
+}
+
+TEST(FastOrderBook, FokKillsWhenNotEnoughLiquidity) {
+    Order sell{ .order_id = 1, .price = 100, .original_quantity = 4,
+                .remaining_quantity = 4, .side = Side::Sell, .order_type = OrderType::Limit };
+    Order buy{ .order_id = 2, .price = 100, .original_quantity = 10,
+               .remaining_quantity = 10, .side = Side::Buy, .order_type = OrderType::Limit,
+               .time_in_force = TimeInForce::FOK };
+
+    RecordingSink sink;
+    ExecutionSink& es = sink;
+    FastOrderBook book(MIN, MAX, TICK);
+
+    book.process(sell, es);
+    book.process(buy, es);
+
+    EXPECT_EQ(0u, sink.trades.size());           // all-or-nothing: nothing happened
+    EXPECT_EQ(100, book.getBestAsk());           // resting sell is untouched
+    EXPECT_EQ(std::nullopt, book.getBestBid());
+}
+
+TEST(FastOrderBook, FokFillsWhenEnoughLiquidity) {
+    Order sell1{ .order_id = 1, .price = 100, .original_quantity = 6,
+                 .remaining_quantity = 6, .side = Side::Sell, .order_type = OrderType::Limit };
+    Order sell2{ .order_id = 2, .price = 101, .original_quantity = 6,
+                 .remaining_quantity = 6, .side = Side::Sell, .order_type = OrderType::Limit };
+    Order buy{ .order_id = 3, .price = 101, .original_quantity = 10,
+               .remaining_quantity = 10, .side = Side::Buy, .order_type = OrderType::Limit,
+               .time_in_force = TimeInForce::FOK };
+
+    RecordingSink sink;
+    ExecutionSink& es = sink;
+    FastOrderBook book(MIN, MAX, TICK);
+
+    book.process(sell1, es);
+    book.process(sell2, es);
+    book.process(buy, es);
+
+    EXPECT_EQ(2u, sink.trades.size());           // 6 @100 + 4 @101
+    EXPECT_EQ(101, book.getBestAsk());           // 2 left at 101
+    EXPECT_EQ(std::nullopt, book.getBestBid());  // FOK never rests
+}
+
 // Pool starts tiny so the free list is exhausted almost immediately: this is
 // the only test that actually drives grow(). Correctness must be unchanged.
 TEST(FastOrderBook, PoolGrowsBeyondInitialCapacity) {
@@ -161,6 +222,7 @@ TEST(FastOrderBook, DifferentialAgainstOracle) {
     std::uniform_int_distribution<Quantity>  qty_dist(1, 20);
     std::uniform_int_distribution<int>       side_dist(0, 1);
     std::uniform_int_distribution<int>       action_dist(0, 9);  // ~20% cancels
+    std::uniform_int_distribution<int>       tif_dist(0, 4);     // GTC-heavy, some IOC/FOK
 
     OrderBook oracle;
     FastOrderBook fast(MIN, MAX, TICK, /*pool_capacity=*/8);  // tiny -> forces grow()
@@ -180,6 +242,11 @@ TEST(FastOrderBook, DifferentialAgainstOracle) {
         Side side = side_dist(rng) ? Side::Buy : Side::Sell;
         bool market = (action_dist(rng) == 0);   // occasional market order
         Quantity q = qty_dist(rng);
+        TimeInForce tif = TimeInForce::GTC;
+        if (!market) {
+            int t = tif_dist(rng);
+            tif = (t == 0) ? TimeInForce::IOC : (t == 1) ? TimeInForce::FOK : TimeInForce::GTC;
+        }
         Order order{
             .order_id = next_id++,
             .price = market ? 0 : price_dist(rng),
@@ -187,6 +254,7 @@ TEST(FastOrderBook, DifferentialAgainstOracle) {
             .remaining_quantity = q,
             .side = side,
             .order_type = market ? OrderType::Market : OrderType::Limit,
+            .time_in_force = tif,
         };
         applyAndCompare(order, oracle, fast, oracle_sink, fast_sink);
         if (::testing::Test::HasFailure()) {

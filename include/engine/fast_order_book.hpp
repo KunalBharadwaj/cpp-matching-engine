@@ -210,6 +210,29 @@ class FastOrderBook {
         processOrder(order, execution_sink, aggressive, false);
     }
 
+    // FOK pre-check. Cheaper than the oracle's: each level already carries its
+    // total_quantity, so we sum per level instead of per order.
+    bool canFullyFill(const Order& order) const {
+        Quantity need = order.remaining_quantity;
+        Quantity avail = 0;
+        if (order.side == Side::Buy) {
+            for (std::int64_t i = best_ask_idx;
+                 i != NIL && i < static_cast<std::int64_t>(size) && indexToPrice(i) <= order.price;
+                 ++i) {
+                avail += ask[i].total_quantity;
+                if (avail >= need) return true;
+            }
+        } else {
+            for (std::int64_t i = best_bid_idx;
+                 i >= 0 && indexToPrice(i) >= order.price;
+                 --i) {
+                avail += bid[i].total_quantity;
+                if (avail >= need) return true;
+            }
+        }
+        return avail >= need;
+    }
+
 public:
 
     // pool_capacity pre-sizes the free list so steady-state inserts never
@@ -227,8 +250,19 @@ public:
     }
 
     void process(Order& order, ExecutionSink& execution_sink) {
-        if (order.order_type == OrderType::Limit)       processLimitOrder(order, execution_sink);
-        else if (order.order_type == OrderType::Market) processMarketOrder(order, execution_sink);
+        if (order.order_type == OrderType::Market) { processMarketOrder(order, execution_sink); return; }
+        switch (order.time_in_force) {
+            case TimeInForce::GTC:
+                processOrder(order, execution_sink, order.price, true);
+                break;
+            case TimeInForce::IOC:
+                processOrder(order, execution_sink, order.price, false);
+                break;
+            case TimeInForce::FOK:
+                if (canFullyFill(order))
+                    processOrder(order, execution_sink, order.price, false);
+                break;
+        }
     }
 
     std::optional<Price> getBestBid() const {
