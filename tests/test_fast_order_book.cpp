@@ -129,6 +129,32 @@ void applyAndCompare(Order order,
 }
 }  // namespace
 
+// Pool starts tiny so the free list is exhausted almost immediately: this is
+// the only test that actually drives grow(). Correctness must be unchanged.
+TEST(FastOrderBook, PoolGrowsBeyondInitialCapacity) {
+    RecordingSink sink;
+    ExecutionSink& es = sink;
+    FastOrderBook book(MIN, MAX, TICK, /*pool_capacity=*/4);
+
+    // Rest 200 non-crossing sell orders at distinct prices (> capacity of 4).
+    for (OrderId id = 1; id <= 200; ++id) {
+        Order sell{ .order_id = id, .price = static_cast<Price>(200 + id),
+                    .original_quantity = 5, .remaining_quantity = 5,
+                    .side = Side::Sell, .order_type = OrderType::Limit };
+        book.process(sell, es);
+    }
+    EXPECT_EQ(0u, sink.trades.size());
+    EXPECT_EQ(201, book.getBestAsk());        // lowest resting ask = 200 + 1
+
+    // A big buy sweeps all of them -> 200 trades, book emptied.
+    Order buy{ .order_id = 999, .original_quantity = 5 * 200,
+               .remaining_quantity = 5 * 200, .side = Side::Buy,
+               .order_type = OrderType::Market };
+    book.process(buy, es);
+    EXPECT_EQ(200u, sink.trades.size());
+    EXPECT_EQ(std::nullopt, book.getBestAsk());
+}
+
 TEST(FastOrderBook, DifferentialAgainstOracle) {
     std::mt19937_64 rng(12345);               // fixed seed -> reproducible failures
     std::uniform_int_distribution<Price>     price_dist(MIN, MAX);
@@ -137,7 +163,7 @@ TEST(FastOrderBook, DifferentialAgainstOracle) {
     std::uniform_int_distribution<int>       action_dist(0, 9);  // ~20% cancels
 
     OrderBook oracle;
-    FastOrderBook fast(MIN, MAX, TICK);
+    FastOrderBook fast(MIN, MAX, TICK, /*pool_capacity=*/8);  // tiny -> forces grow()
     RecordingSink oracle_sink, fast_sink;
 
     OrderId next_id = 1;

@@ -1,7 +1,6 @@
 #pragma once
 
 #include <vector>
-#include <list>
 #include <optional>
 #include <limits>
 #include <algorithm>
@@ -12,86 +11,145 @@
 #include "engine/execution_sink.hpp"
 
 
-// One rung of the price ladder. `total_quantity` is a running sum of the
-// resting quantity at this price so top-of-book depth is O(1) later; we keep
-// it honest on every add / fill / cancel.
+// A single order living in the pool. The next/prev links are INTRUSIVE --
+// they live inside the node itself, so a resting order costs no separate
+// list-node allocation. They are indices into FastOrderBook::nodes (not
+// pointers) so the pool can grow/reallocate without dangling, and so each
+// link is 4 bytes instead of 8. NIL (-1) marks "no node".
+struct PoolNode {
+    Order order{};
+    std::int32_t next{-1};
+    std::int32_t prev{-1};
+};
+
+// One rung of the ladder. It no longer owns its orders -- it just points at
+// the head/tail of its intrusive FIFO chain inside the shared pool.
+// total_quantity is the running resting depth at this price (O(1) depth).
 struct PriceLevel {
-    std::list<Order> orders;      // FIFO queue -> preserves time priority
+    std::int32_t head{-1};
+    std::int32_t tail{-1};
     Quantity total_quantity{};
 };
 
-// Phase 2 book: replaces the oracle's std::map with a flat array indexed by
-// price. Specific-price lookup is O(1) and the storage is contiguous, but a
-// vector can't tell us where the top of book is -- that is the whole job of
-// best_bid_idx / best_ask_idx, the cursors that replace map::begin().
+// Phase 2 book: flat price ladder + object pool + intrusive FIFO.
+//   * ladder: bid[i]/ask[i] hold the orders at indexToPrice(i); O(1) price lookup.
+//   * pool:   one contiguous vector<PoolNode>; alloc/free = free-list pop/push,
+//             so there is no malloc on the hot path.
+//   * cursors: best_bid_idx/best_ask_idx replace what map::begin() gave the oracle.
 class FastOrderBook {
+    static constexpr std::int32_t NIL = -1;
+
     std::size_t size{};
     Price min_price{}, max_price{}, tick_size{};
 
-    // bid[i] and ask[i] both hold the orders resting at indexToPrice(i).
-    // Higher index == higher price (idx grows with price).
     std::vector<PriceLevel> bid;
     std::vector<PriceLevel> ask;
 
-    // INVARIANT (the heart of Phase 2):
-    //   best_bid_idx = highest non-empty index in `bid`, or -1 if no bids.
-    //   best_ask_idx = lowest  non-empty index in `ask`, or -1 if no asks.
-    // Every mutating operation must leave these true.
-    std::int64_t best_bid_idx{-1};
-    std::int64_t best_ask_idx{-1};
+    // The object pool and its free list (free nodes are chained via `next`).
+    std::vector<PoolNode> nodes;
+    std::int32_t free_head{NIL};
 
-    std::int64_t priceToIndex(Price price) const {
-        return (price - min_price) / tick_size;
-    }
+    // INVARIANT: best_bid_idx = highest non-empty bid index (head != NIL), or
+    // NIL; best_ask_idx = lowest non-empty ask index, or NIL. Every mutation
+    // keeps these true.
+    std::int64_t best_bid_idx{NIL};
+    std::int64_t best_ask_idx{NIL};
 
-    Price indexToPrice(std::int64_t index) const {
-        return min_price + index * tick_size;
-    }
+    std::int64_t priceToIndex(Price price) const { return (price - min_price) / tick_size; }
+    Price indexToPrice(std::int64_t index) const { return min_price + index * tick_size; }
 
-    // The best-ask level just emptied: scan upward for the next non-empty
-    // rung. If none remain, the ask side is empty -> -1. Walking over a run of
-    // empty rungs is why this is amortized cheap, not per-op constant.
-    void advanceBestAsk() {
-        std::int64_t i = best_ask_idx + 1;
-        while (i < static_cast<std::int64_t>(size) && ask[i].orders.empty()) i++;
-        best_ask_idx = (i < static_cast<std::int64_t>(size)) ? i : -1;
-    }
+    // ---- object pool -------------------------------------------------------
 
-    // Mirror image for bids: best is the highest index, so we scan downward.
-    void advanceBestBid() {
-        std::int64_t i = best_bid_idx - 1;
-        while (i >= 0 && bid[i].orders.empty()) i--;
-        best_bid_idx = (i >= 0) ? i : -1;
-    }
-
-    // Rest the unfilled remainder on our own side and repair the cursor.
-    void addToBook(Order& order) {
-        std::int64_t idx = priceToIndex(order.price);
-        assert(idx >= 0 && idx < static_cast<std::int64_t>(size));
-        if (order.side == Side::Buy) {
-            bid[idx].orders.push_back(order);
-            bid[idx].total_quantity += order.remaining_quantity;
-            if (best_bid_idx == -1 || idx > best_bid_idx) best_bid_idx = idx;
-        } else {
-            ask[idx].orders.push_back(order);
-            ask[idx].total_quantity += order.remaining_quantity;
-            if (best_ask_idx == -1 || idx < best_ask_idx) best_ask_idx = idx;
+    // Append a fresh block of nodes and chain them onto the free list. This is
+    // the ONLY allocation path; with a well-sized pool it never runs on the
+    // hot path. Called only when the free list is exhausted.
+    void grow() {
+        std::size_t old = nodes.size();
+        std::size_t add = old ? old : 1024;          // double, or seed with 1024
+        nodes.resize(old + add);
+        for (std::size_t i = nodes.size(); i-- > old; ) {
+            nodes[i].next = free_head;
+            free_head = static_cast<std::int32_t>(i);
         }
     }
 
-    // FIFO fill at a single level -- identical semantics to the oracle's
-    // consumeLevel, plus we keep PriceLevel::total_quantity in sync.
+    // Pop a node off the free list and store the order in it. May grow() --
+    // callers must not hold a PoolNode& across this call (indices are fine).
+    std::int32_t allocNode(const Order& order) {
+        if (free_head == NIL) grow();
+        std::int32_t idx = free_head;
+        free_head = nodes[idx].next;
+        nodes[idx].order = order;
+        nodes[idx].next = NIL;
+        nodes[idx].prev = NIL;
+        return idx;
+    }
+
+    void freeNode(std::int32_t idx) {
+        nodes[idx].next = free_head;
+        free_head = idx;
+    }
+
+    // ---- intrusive doubly-linked list (O(1) push/unlink) -------------------
+
+    void listPushBack(PriceLevel& level, std::int32_t idx) {
+        nodes[idx].prev = level.tail;
+        nodes[idx].next = NIL;
+        if (level.tail != NIL) nodes[level.tail].next = idx;
+        else                   level.head = idx;      // level was empty
+        level.tail = idx;
+    }
+
+    void listUnlink(PriceLevel& level, std::int32_t idx) {
+        std::int32_t p = nodes[idx].prev, n = nodes[idx].next;
+        if (p != NIL) nodes[p].next = n; else level.head = n;
+        if (n != NIL) nodes[n].prev = p; else level.tail = p;
+    }
+
+    // ---- cursors -----------------------------------------------------------
+
+    void advanceBestAsk() {
+        std::int64_t i = best_ask_idx + 1;
+        while (i < static_cast<std::int64_t>(size) && ask[i].head == NIL) i++;
+        best_ask_idx = (i < static_cast<std::int64_t>(size)) ? i : NIL;
+    }
+
+    void advanceBestBid() {
+        std::int64_t i = best_bid_idx - 1;
+        while (i >= 0 && bid[i].head == NIL) i--;
+        best_bid_idx = (i >= 0) ? i : NIL;
+    }
+
+    // ---- matching ----------------------------------------------------------
+
+    void addToBook(Order& order) {
+        std::int64_t idx = priceToIndex(order.price);
+        assert(idx >= 0 && idx < static_cast<std::int64_t>(size));
+        std::int32_t node = allocNode(order);          // may grow the pool
+        if (order.side == Side::Buy) {
+            listPushBack(bid[idx], node);
+            bid[idx].total_quantity += order.remaining_quantity;
+            if (best_bid_idx == NIL || idx > best_bid_idx) best_bid_idx = idx;
+        } else {
+            listPushBack(ask[idx], node);
+            ask[idx].total_quantity += order.remaining_quantity;
+            if (best_ask_idx == NIL || idx < best_ask_idx) best_ask_idx = idx;
+        }
+    }
+
+    // FIFO fill at one level. No allocation happens here, so the maker
+    // reference into the pool stays valid for the whole call.
     void consumeLevel(Order& taker, PriceLevel& level, ExecutionSink& execution_sink) {
-        std::list<Order>& queue = level.orders;
-        while (!queue.empty() && taker.remaining_quantity > 0) {
-            Order& maker = queue.front();
+        while (level.head != NIL && taker.remaining_quantity > 0) {
+            std::int32_t maker_idx = level.head;
+            Order& maker = nodes[maker_idx].order;
             Quantity tradeable_quantity =
                 std::min(taker.remaining_quantity, maker.remaining_quantity);
 
             Trade trade {
                 .maker = maker.order_id,
                 .taker = taker.order_id,
-                .price = maker.price,          // trade prints at the resting (maker) price
+                .price = maker.price,
                 .quantity = tradeable_quantity
             };
             execution_sink.on_trade(trade);
@@ -99,33 +157,32 @@ class FastOrderBook {
             taker.remaining_quantity -= tradeable_quantity;
             maker.remaining_quantity -= tradeable_quantity;
             level.total_quantity     -= tradeable_quantity;
-            if (maker.remaining_quantity == 0) queue.pop_front();
+            if (maker.remaining_quantity == 0) {
+                listUnlink(level, maker_idx);          // O(1) via prev/next
+                freeNode(maker_idx);
+            }
         }
     }
 
-    // Same shape as the oracle: sweep the opposite side while it is in range
-    // and we still have quantity, then (for limits) rest the remainder.
     void processOrder(Order& order, ExecutionSink& execution_sink,
                       Price limit_price, bool rest_remainder) {
         switch (order.side) {
             case Side::Buy: {
-                while (best_ask_idx != -1
+                while (best_ask_idx != NIL
                        && indexToPrice(best_ask_idx) <= limit_price
                        && order.remaining_quantity > 0) {
                     consumeLevel(order, ask[best_ask_idx], execution_sink);
-                    // If we drained the level, move the cursor up; otherwise
-                    // the taker is exhausted and the loop condition stops us.
-                    if (ask[best_ask_idx].orders.empty()) advanceBestAsk();
+                    if (ask[best_ask_idx].head == NIL) advanceBestAsk();
                 }
                 if (order.remaining_quantity > 0 && rest_remainder) addToBook(order);
                 break;
             }
             case Side::Sell: {
-                while (best_bid_idx != -1
+                while (best_bid_idx != NIL
                        && indexToPrice(best_bid_idx) >= limit_price
                        && order.remaining_quantity > 0) {
                     consumeLevel(order, bid[best_bid_idx], execution_sink);
-                    if (bid[best_bid_idx].orders.empty()) advanceBestBid();
+                    if (bid[best_bid_idx].head == NIL) advanceBestBid();
                 }
                 if (order.remaining_quantity > 0 && rest_remainder) addToBook(order);
                 break;
@@ -138,8 +195,6 @@ class FastOrderBook {
     }
 
     void processMarketOrder(Order& order, ExecutionSink& execution_sink) {
-        // A market order crosses at any price, so we hand the walk a sentinel
-        // limit that can never gate it, and never rest the remainder.
         Price aggressive = (order.side == Side::Buy)
             ? std::numeric_limits<Price>::max()
             : std::numeric_limits<Price>::min();
@@ -148,11 +203,19 @@ class FastOrderBook {
 
 public:
 
-    FastOrderBook(Price min_price, Price max_price, Price tick_size)
+    // pool_capacity pre-sizes the free list so steady-state inserts never
+    // grow(). Pick it above the peak number of simultaneously-resting orders.
+    FastOrderBook(Price min_price, Price max_price, Price tick_size,
+                  std::size_t pool_capacity = (1u << 16))
         : size(static_cast<std::size_t>((max_price - min_price) / tick_size) + 1),
           min_price(min_price), max_price(max_price), tick_size(tick_size),
-          bid(size), ask(size),
-          best_bid_idx(-1), best_ask_idx(-1) {}
+          bid(size), ask(size) {
+        nodes.resize(pool_capacity);
+        for (std::size_t i = pool_capacity; i-- > 0; ) {   // index 0 handed out first
+            nodes[i].next = free_head;
+            free_head = static_cast<std::int32_t>(i);
+        }
+    }
 
     void process(Order& order, ExecutionSink& execution_sink) {
         if (order.order_type == OrderType::Limit)       processLimitOrder(order, execution_sink);
@@ -160,36 +223,37 @@ public:
     }
 
     std::optional<Price> getBestBid() const {
-        if (best_bid_idx == -1) return std::nullopt;
+        if (best_bid_idx == NIL) return std::nullopt;
         return indexToPrice(best_bid_idx);
     }
 
     std::optional<Price> getBestAsk() const {
-        if (best_ask_idx == -1) return std::nullopt;
+        if (best_ask_idx == NIL) return std::nullopt;
         return indexToPrice(best_ask_idx);
     }
 
-    // O(active levels) scan for now -- same "before" as the oracle. Phase 3's
-    // flat hash registry is what turns this into O(1).
+    // Still an O(active levels) scan per side -- but the unlink itself is now
+    // O(1). Phase 3 adds an OrderId -> node-index registry to make the whole
+    // cancel O(1).
     bool cancelOrder(OrderId order_id) {
         for (std::int64_t i = 0; i < static_cast<std::int64_t>(size); i++) {
-            std::list<Order>& queue = ask[i].orders;
-            for (auto it = queue.begin(); it != queue.end(); ++it) {
-                if (it->order_id == order_id) {
-                    ask[i].total_quantity -= it->remaining_quantity;
-                    queue.erase(it);
-                    if (queue.empty() && i == best_ask_idx) advanceBestAsk();
+            for (std::int32_t it = ask[i].head; it != NIL; it = nodes[it].next) {
+                if (nodes[it].order.order_id == order_id) {
+                    ask[i].total_quantity -= nodes[it].order.remaining_quantity;
+                    listUnlink(ask[i], it);
+                    freeNode(it);
+                    if (ask[i].head == NIL && i == best_ask_idx) advanceBestAsk();
                     return true;
                 }
             }
         }
         for (std::int64_t i = 0; i < static_cast<std::int64_t>(size); i++) {
-            std::list<Order>& queue = bid[i].orders;
-            for (auto it = queue.begin(); it != queue.end(); ++it) {
-                if (it->order_id == order_id) {
-                    bid[i].total_quantity -= it->remaining_quantity;
-                    queue.erase(it);
-                    if (queue.empty() && i == best_bid_idx) advanceBestBid();
+            for (std::int32_t it = bid[i].head; it != NIL; it = nodes[it].next) {
+                if (nodes[it].order.order_id == order_id) {
+                    bid[i].total_quantity -= nodes[it].order.remaining_quantity;
+                    listUnlink(bid[i], it);
+                    freeNode(it);
+                    if (bid[i].head == NIL && i == best_bid_idx) advanceBestBid();
                     return true;
                 }
             }
