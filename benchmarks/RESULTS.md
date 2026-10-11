@@ -1,10 +1,12 @@
 # Benchmark results
 
-Per-operation latency of the two order-book implementations under an
-identical workload. The naive `OrderBook` (`std::map` + `std::list`) is the
-correctness oracle; `FastOrderBook` is the price-ladder + object-pool +
-intrusive-list design. Both are differentially tested to produce identical
-output, so this measures *only* the data-structure difference.
+Per-operation latency of three order-book implementations under an identical
+workload. `OrderBook` (`std::map` + `std::list`, O(n) cancel) is the naive
+oracle; `IndexedOrderBook` is the same map **plus an id index** (the fair
+baseline, O(log n) cancel); `FastOrderBook` is the price-ladder + object-pool +
+intrusive-list design (O(1) cancel). All three are differentially tested to
+produce identical output, so this measures *only* the data-structure
+difference — and separates the algorithmic fix from the cache-level one.
 
 ## How to reproduce
 
@@ -24,55 +26,63 @@ cmake --build build --target bench
   pre-reserved vector and percentiled *after* the run.
 - **Broken down by op kind** — a blended average would hide the cancel story.
 - **Counting sink** (no allocation) so we time the book, not bookkeeping.
-- **Identical trade count** across both books is printed as a cross-check.
+- **Identical trade count** across all three books is printed as a cross-check.
 - **Release build, `-O3 -DNDEBUG`, no sanitizers.**
 - **Clock-read overhead is reported** (measured each run): `steady_clock::now()`
-  costs ~20 ns here, which is the noise floor. The fast book's p50s (~50–90 ns)
+  costs ~25 ns here, which is the noise floor. The fast book's p50s (~45–70 ns)
   are close to that floor, so its *true* op latency is smaller than the raw
   number — the measurement is partly clock overhead, not book work.
 
 ## Numbers
 
 Machine: 12th Gen Intel Core i5-1235U · g++ 13.3 · Linux · `-O3 -DNDEBUG`.
-Headline run: `./build/bench 200000 42` (clock overhead ≈ 18 ns, both books
-booked 119,563 trades). Latencies in nanoseconds.
+Headline run: `./build/bench 200000 42` (clock overhead ≈ 26 ns; all three
+books booked 119,563 trades). Latencies in nanoseconds.
 
-| op     | book   |    p50 |     p90 |     p99 |   p99.9 |
-|--------|--------|-------:|--------:|--------:|--------:|
-| add    | oracle |    112 |     199 |     389 |   2,431 |
-| add    | fast   |     86 |     178 |     306 |     469 |
-| cancel | oracle | 46,069 | 120,738 | 189,018 | 561,183 |
-| cancel | fast   |     56 |     135 |     290 |     529 |
-| modify | oracle | 51,623 | 125,263 | 189,555 | 541,061 |
-| modify | fast   |     55 |     167 |     364 |     598 |
+| op     | book    |    p50 |     p90 |     p99 |   p99.9 |
+|--------|---------|-------:|--------:|--------:|--------:|
+| add    | naive   |    110 |     194 |     358 |   2,546 |
+| add    | indexed |    113 |     191 |     317 |   1,289 |
+| add    | fast    |     70 |     144 |     245 |     355 |
+| cancel | naive   | 44,856 | 126,594 | 156,731 | 207,629 |
+| cancel | indexed |     46 |     141 |     235 |     393 |
+| cancel | fast    |     46 |      97 |     179 |     358 |
+| modify | naive   | 52,717 | 128,507 | 166,753 | 219,604 |
+| modify | indexed |     47 |     201 |     388 |     558 |
+| modify | fast    |     46 |     126 |     258 |     422 |
 
-Overall throughput: **0.06 M ops/s (oracle) vs 7.44 M ops/s (fast) — ~124×.**
-Cancel/modify are ~800× faster at the median and into four figures in the tail.
+Throughput: **naive 0.06 · indexed 7.72 · fast 9.21 M ops/s.**
+`naive → indexed` removes the O(n) cancel scan (~1000×, table stakes);
+`indexed → fast` is the cache-friendly structures' real gain — ~1.2×
+throughput and tighter tails (cancel p90 141→97, add p50 113→70).
 
 ### Scaling (the real result)
 
-The speedup grows with book depth, because the oracle's cancel/modify are
-O(book size) while the fast book's are O(1). `cancel` p50 and throughput:
+The naive cancel grows with book depth (O(book size)) while the indexed and
+fast books stay flat. `cancel` p50 and throughput:
 
-| ops     | oracle cancel p50 | fast cancel p50 | oracle thru | fast thru   |
-|---------|------------------:|----------------:|------------:|------------:|
-| 50,000  |          4,773 ns |           41 ns | 0.50 M/s    | 8.67 M/s    |
-| 100,000 |         14,515 ns |           42 ns | 0.17 M/s    | 8.94 M/s    |
-| 200,000 |         46,069 ns |           56 ns | 0.06 M/s    | 7.44 M/s    |
+| ops     | naive cancel p50 | indexed cancel p50 | fast cancel p50 | naive thru | fast thru |
+|---------|-----------------:|-------------------:|----------------:|-----------:|----------:|
+| 50,000  |         6,302 ns |             42 ns  |          44 ns  | 0.46 M/s   | 8.07 M/s  |
+| 100,000 |        12,914 ns |             43 ns  |          44 ns  | 0.19 M/s   | 8.63 M/s  |
+| 200,000 |        44,856 ns |             46 ns  |          46 ns  | 0.06 M/s   | 9.21 M/s  |
 
-Oracle latency climbs ~linearly with the book; the fast book is flat.
+The naive scan climbs ~linearly with the book; indexed and fast stay flat
+(and essentially tied on cancel median — the index is what removes the scan).
 
 ## Why the gap looks like this
 
-- **add** is only modestly faster: both do O(log n) / O(1) price lookup and a
-  list push; the ladder wins on cache locality and by avoiding tree rebalancing
-  and per-node `malloc`, but add was never the bottleneck.
-- **cancel / modify** is where the design pays off. The oracle has no handle to
-  a resting order, so it *scans* — O(book size) — and the cost grows as the
-  book deepens (visible in the rising oracle numbers at larger `n`). The fast
-  book goes straight to the node via the `OrderId → pool-index` registry and
-  unlinks in O(1) from the intrusive doubly-linked list. Flat vs. size-
-  dependent — that is the headline.
+- **naive → indexed** is purely algorithmic: the oracle has no handle to a
+  resting order, so cancel/modify *scan* — O(book size), rising with depth. An
+  `OrderId → location` index removes the scan (~1000×). Any competent book does
+  this; it is the baseline, not the achievement.
+- **indexed → fast** is what the ladder + pool + intrusive list actually buy,
+  on top of an already-indexed book. On `cancel` *median* it's a tie — both are
+  ~constant time. The fast book wins on `add` (~1.6× p50), on throughput
+  (~1.2×), and on the **tail** (cancel p90 141→97 ns): contiguous ladder memory
+  (no tree pointer-chase or rebalancing), an object pool (no per-order
+  `malloc`), and an intrusive list (no node allocation) make its worst cases
+  far less ragged. Tighter tails are the point in low-latency work.
 
 ## Caveats / next steps
 

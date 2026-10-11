@@ -16,6 +16,7 @@
 
 #include "engine/order.hpp"
 #include "engine/order_book.hpp"
+#include "engine/indexed_order_book.hpp"
 #include "engine/fast_order_book.hpp"
 #include "engine/execution_sink.hpp"
 
@@ -224,12 +225,17 @@ int main(int argc, char** argv) {
     {
         OrderBook oracle;
         Result r = run(oracle, ops);
-        print_result("OrderBook (oracle: std::map + std::list)", r, n);
+        print_result("1. OrderBook  (naive: std::map + std::list, O(n) cancel scan)", r, n);
+    }
+    {
+        IndexedOrderBook indexed;
+        Result r = run(indexed, ops);
+        print_result("2. IndexedOrderBook  (std::map + id index, O(log n) cancel)", r, n);
     }
     {
         FastOrderBook fast(MIN_PRICE, MAX_PRICE, TICK, n);
         Result r = run(fast, ops);
-        print_result("FastOrderBook (ladder + pool + intrusive list)", r, n);
+        print_result("3. FastOrderBook  (ladder + pool + intrusive list, O(1) cancel)", r, n);
     }
     return 0;
 }

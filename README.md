@@ -10,9 +10,11 @@ fast way — then the fast build is proven identical to the correct one by
 differential testing and measured against it.
 
 The point isn't just that it matches orders. It's that every performance
-decision is **deliberate, explained, and benchmarked**: O(1) cancel/modify
-run ~800× faster at the median than the naive book at a realistic workload,
-and the gap *grows with book depth* — exactly as the Big-O predicts.
+decision is **deliberate, explained, and benchmarked against a *fair*
+baseline** — not a strawman. Removing an O(n) cancel scan is ~1000× (table
+stakes, and I say so); the cache-friendly data structures on top then buy
+~1.2× throughput and markedly tighter tail latency — the part that actually
+matters in a low-latency system.
 
 > Single-threaded hot path · header-only engine · C++20 · GoogleTest ·
 > clean under AddressSanitizer + UBSan.
@@ -21,42 +23,56 @@ and the gap *grows with book depth* — exactly as the Big-O predicts.
 
 ## Results at a glance
 
-Identical workload (200,000 ops, ~70% adds / 15% cancels / 15% modifies,
-prices clustered around a mid) driven through both books on a 12th-gen
-Intel i5-1235U, g++ 13.3, `-O3 -DNDEBUG`. Both books produced the **same
-119,563 trades** — the benchmark cross-checks that.
+**Three** implementations of the same book, driven through one seeded workload
+(200,000 ops: ~70% adds / 15% cancels / 15% modifies, prices around a mid) on a
+12th-gen Intel i5-1235U, g++ 13.3, `-O3 -DNDEBUG`. All three are
+**differentially tested to emit identical trades** (119,563 here), so the
+numbers isolate the data structure and nothing else:
 
-Full latency distribution (nanoseconds), both books, same run:
+| # | Book | cancel/modify | what it changes |
+|---|------|:-------------:|-----------------|
+| 1 | `OrderBook`        | **O(n)** scan  | naive `std::map` + `std::list` |
+| 2 | `IndexedOrderBook` | **O(log n)**   | same map, **plus an `OrderId → location` index** |
+| 3 | `FastOrderBook`    | **O(1)**       | price ladder + object pool + intrusive list |
 
-| Operation | Book      |     p50 |      p90 |      p99 |    p99.9 |
-|-----------|-----------|--------:|---------:|---------:|---------:|
-| add       | naive     |     112 |      199 |      389 |    2,431 |
-| add       | **fast**  |  **86** |  **178** |  **306** |  **469** |
-| **cancel**| naive     |  46,069 |  120,738 |  189,018 |  561,183 |
-| **cancel**| **fast**  |  **56** |  **135** |  **290** |  **529** |
-| **modify**| naive     |  51,623 |  125,263 |  189,555 |  541,061 |
-| **modify**| **fast**  |  **55** |  **167** |  **364** |  **598** |
+Separating the two effects matters, because it's easy to quote one misleading
+headline number. There are really two results:
 
-**Throughput:** 0.06 M ops/s → **7.44 M ops/s** (~124×). Cancel and modify are
-the story — roughly **800× faster at the median and into four figures in the
-tail** — because the naive book scans (O(book size)) while the fast book
-unlinks in O(1). `add` is close (~1.3×): it was never the bottleneck.
+### Result 1 — don't scan the book (naive → indexed)
 
-The headline speedup is not a fixed number — it *scales*, because the naive
-cancel/modify are O(book size) while the fast ones are O(1):
+Cancel p50 drops **44,856 ns → 46 ns (~1000×)** just by keeping an id index
+instead of scanning. This is the number that *looks* huge — but it's table
+stakes: any competent implementation does it. The naive book is a deliberately
+simple oracle, so I treat its O(n) cancel as the baseline, **not** as the win.
+The trap it avoids, as the book deepens:
 
 <p align="center">
-  <img src="benchmarks/latency-scaling.svg" alt="Cancel latency vs. book size: the naive book climbs from 5µs to 46µs as the book deepens while the fast book stays flat near 40-56ns" width="680">
+  <img src="benchmarks/latency-scaling.svg" alt="Cancel p50 vs book size: the naive O(n) scan climbs from 6µs to 45µs as the book grows, while the indexed and fast books stay flat near 45ns" width="680">
 </p>
 
-| Workload size | Naive cancel p50 | Fast cancel p50 | Naive throughput | Fast throughput |
-|:-------------:|-----------------:|----------------:|-----------------:|----------------:|
-| 50,000 ops    |         4,773 ns |         **41 ns** |      0.50 M ops/s |    **8.67 M ops/s** |
-| 100,000 ops   |        14,515 ns |         **42 ns** |      0.17 M ops/s |    **8.94 M ops/s** |
-| 200,000 ops   |        46,069 ns |         **56 ns** |      0.06 M ops/s |    **7.44 M ops/s** |
+### Result 2 — what the cache-friendly structures actually buy (indexed → fast)
 
-The naive book degrades as it fills; the fast book is flat. That divergence —
-not any single number — is the result.
+This is the honest comparison: both already cancel in ~constant time, so it
+measures the **ladder + object pool + intrusive list alone**. They don't beat
+the index on cancel *median* — they win on **throughput and tail latency**,
+which is what a low-latency system actually cares about:
+
+| op     | metric | Indexed (map + index) | **Fast** (ladder + pool) |  gain |
+|--------|--------|----------------------:|-------------------------:|------:|
+| add    | p50    |                113 ns |                **70 ns** | 1.6×  |
+| add    | p99    |                317 ns |               **245 ns** | 1.3×  |
+| cancel | p50    |                 46 ns |                **46 ns** |   —   |
+| cancel | p90    |                141 ns |                **97 ns** | 1.5×  |
+| cancel | p99    |                235 ns |               **179 ns** | 1.3×  |
+| modify | p90    |                201 ns |               **126 ns** | 1.6×  |
+
+**Throughput: 7.72 → 9.21 M ops/s (~1.2×).**
+
+Why: the contiguous ladder avoids the tree's pointer-chasing and rebalancing,
+the object pool removes a `malloc`/`free` per resting order, and the intrusive
+list removes the per-node allocation. Those shave the mean and — more
+importantly — **compress the tail**; they don't change the O(1) cancel the
+index already gave. Modest and honest beats a cherry-picked 1000×.
 
 ---
 
@@ -115,7 +131,10 @@ EventSource ──▶ OrderBook / FastOrderBook ──▶ ExecutionSink
 
 - **`EventSource`** — abstract order ingress (a vector replayer today; a file
   or network feed could drop in behind the same interface).
-- **`OrderBook`** — the naive reference implementation (`std::map`+`std::list`).
+- **`OrderBook`** — the naive reference implementation (`std::map`+`std::list`),
+  the correctness oracle.
+- **`IndexedOrderBook`** — the fair baseline: same map, plus an id index so
+  cancel/modify don't scan.
 - **`FastOrderBook`** — the optimized implementation (below).
 - **`ExecutionSink`** — abstract trade/report output (`RecordingSink` for tests,
   a counting sink for benchmarks).
@@ -165,8 +184,9 @@ than 8-byte pointers keep the links small and reallocation-safe.
 ### 3. Order registry → `OrderId → pool index`
 
 A hash map from order id to pool index means cancel/modify go *straight* to the
-node and unlink in O(1) — no scanning. This is the single change behind the
-~800× cancel/modify speedup.
+node and unlink in O(1) — no scanning. (The `IndexedOrderBook` baseline does the
+same thing on a `std::map`, which is why the *honest* win over it is modest —
+see Results. The ~1000× over the naive scan is just not scanning.)
 
 **Honest note:** this uses `std::unordered_map` today. An open-addressing flat
 hash map (`ankerl::unordered_dense`, Abseil `flat_hash_map`) would cut the
@@ -179,15 +199,16 @@ constant further by being cache-friendlier; it's the first item on the roadmap.
 A fast engine that fills wrong is worthless, so correctness is enforced first:
 
 - **Differential testing** — the headline technique. A 5,000-operation random
-  stream (limit/market, GTC/IOC/FOK, cancel, modify) is fed to *both* the fast
-  book and the naive oracle, asserting **identical trades and identical
-  top-of-book after every single operation**. The fast book's whole reason to
-  exist is to match the oracle exactly; this proves it does.
+  stream (limit/market, GTC/IOC/FOK, cancel, modify) is fed to the naive oracle
+  and asserted, after *every* operation, to produce **identical trades and
+  top-of-book** in both the `IndexedOrderBook` baseline and the `FastOrderBook`.
+  Each fast implementation's whole reason to exist is to match the oracle
+  exactly; this proves both do.
 - **Targeted unit tests** for each order type and the nasty edges: partial
   fills, market-into-empty-book, IOC dropping its remainder, FOK killing on
   insufficient liquidity, modify keeping vs. losing priority, cursor repair on
   cancel, object-pool growth under load.
-- **25 GoogleTests**, all green under `-fsanitize=address,undefined`.
+- **28 GoogleTests**, all green under `-fsanitize=address,undefined`.
 
 ---
 
@@ -203,7 +224,7 @@ A fast engine that fills wrong is worthless, so correctness is enforced first:
   the cancel story, which is the whole point.
 - **Counting sink** (no allocation, no I/O) so the book is measured, not
   bookkeeping.
-- **Trade counts are cross-checked** between the two books every run.
+- **Trade counts are cross-checked** across all three books every run.
 - **Release build, `-O3 -DNDEBUG`, sanitizers off** — ASan inflates latency
   several-fold, so perf numbers never come from the test build.
 - **Clock overhead is reported and acknowledged.** A back-to-back
@@ -218,19 +239,19 @@ A fast engine that fills wrong is worthless, so correctness is enforced first:
 - **Known limitation:** the thread is *not* pinned to a core and turbo /
   frequency scaling is left on, so absolute latencies (especially the tails)
   would tighten under `taskset` + a fixed clock on an isolated box. The
-  *relative* naive-vs-fast comparison — same machine, same workload, back to
-  back — is robust to this, and the asymptotic gap is the point regardless.
+  *relative* comparison — same machine, same workload, back to back — is robust
+  to this, and the asymptotic gap is the point regardless.
 
 ### Interpreting the gap
 
-- **add** barely moves (~1.3× p50): both do O(1)/O(log n) placement plus a list
-  push. The ladder wins on cache locality and by avoiding tree rebalancing and
-  per-node allocation, but `add` was never the bottleneck.
-- **cancel / modify** is where the design pays off. The naive book holds no
-  handle to a resting order, so it **scans** — O(book size) — and the cost
-  climbs as the book deepens. The fast book jumps to the node via the registry
-  and unlinks O(1). **Flat vs. size-dependent** is the result; the scaling
-  table above is the proof.
+- **naive vs. indexed** is the O(book size) scan vs. an indexed lookup. Huge on
+  cancel/modify (~1000×), but it's an algorithmic correction any competent
+  implementation makes, not a property of the fast data structures.
+- **indexed vs. fast** is the real test of the ladder + pool + intrusive list.
+  `cancel` median is a tie (both already ~O(1)); the fast book wins on `add`
+  (~1.6×), on throughput (~1.2×), and — most relevantly — on the **tail**
+  (cancel p90/p99), because contiguous memory, no per-order `malloc`, and no
+  tree rebalancing make its worst cases far less ragged than the map's.
 
 Numbers are single-machine and directional, not promises — reproduce them on
 your own box with the command below.
@@ -273,8 +294,9 @@ include/engine/
   execution_sink.hpp     trade-output interface + recording sink
   command.hpp  engine.hpp the pull-loop runner
   order_book.hpp         naive reference book (the oracle)
+  indexed_order_book.hpp fair baseline: std::map + OrderId->location index
   fast_order_book.hpp    price ladder + object pool + intrusive list + registry
-tests/                   GoogleTest suites (incl. the differential test)
+tests/                   GoogleTest suites (incl. the differential tests)
 benchmarks/              bench harness + RESULTS.md
 ```
 

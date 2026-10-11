@@ -2,11 +2,10 @@
   <!-- white card so it stays readable on light or dark GitHub themes -->
   <rect x="0" y="0" width="760" height="420" rx="10" fill="#ffffff" stroke="#e3e3e3"/>
 
-  <text x="40" y="38" font-size="19" font-weight="700" fill="#1b1b1b">Cancel latency (p50): O(n) scan vs. O(1) registry</text>
-  <text x="40" y="60" font-size="13" fill="#6b6b6b">Median time to cancel a resting order as the book deepens. Log scale. Lower is better.</text>
+  <text x="40" y="38" font-size="19" font-weight="700" fill="#1b1b1b">Cancel latency (p50): the O(n) scan trap</text>
+  <text x="40" y="60" font-size="13" fill="#6b6b6b">Naive book scans the whole book; indexed &amp; fast go straight to the order. Log scale, lower is better.</text>
 
-  <!-- plot area: x 90..660, y 80..340 -->
-  <!-- y gridlines per decade: 10ns..1ms -->
+  <!-- plot area: x 90..660, y 80..340 ; y gridlines per decade (52px): 10ns..1ms -->
   <g font-size="12" fill="#9a9a9a">
     <line x1="90" y1="340" x2="660" y2="340" stroke="#ededed"/><text x="84" y="344" text-anchor="end">10 ns</text>
     <line x1="90" y1="288" x2="660" y2="288" stroke="#ededed"/><text x="84" y="292" text-anchor="end">100 ns</text>
@@ -16,7 +15,6 @@
     <line x1="90" y1="80"  x2="660" y2="80"  stroke="#ededed"/><text x="84" y="84"  text-anchor="end">1 ms</text>
   </g>
 
-  <!-- x labels at 170 / 375 / 580 -->
   <g font-size="12.5" fill="#6b6b6b" text-anchor="middle">
     <text x="170" y="362">50k ops</text>
     <text x="375" y="362">100k ops</text>
@@ -24,33 +22,31 @@
   </g>
   <text x="375" y="388" font-size="12.5" fill="#9a9a9a" text-anchor="middle">workload size (operations) → book depth</text>
 
-  <!-- Naive OrderBook: 4,773 / 14,515 / 46,069 ns  (y = 340 - (log10(v)-1)*52) -->
-  <polyline points="170,201 375,176 580,150" fill="none" stroke="#e8543f" stroke-width="3"/>
+  <!-- Naive OrderBook cancel p50: 6,302 / 12,914 / 44,856 ns -->
+  <polyline points="170,194 375,178 580,150" fill="none" stroke="#e8543f" stroke-width="3"/>
   <g fill="#e8543f">
-    <circle cx="170" cy="201" r="4.5"/><circle cx="375" cy="176" r="4.5"/><circle cx="580" cy="150" r="4.5"/>
+    <circle cx="170" cy="194" r="4.5"/><circle cx="375" cy="178" r="4.5"/><circle cx="580" cy="150" r="4.5"/>
   </g>
   <g font-size="12" font-weight="700" fill="#c33d2a" text-anchor="middle">
-    <text x="170" y="193">5 µs</text><text x="375" y="168">15 µs</text><text x="602" y="142">46 µs</text>
+    <text x="170" y="186">6 µs</text><text x="375" y="170">13 µs</text><text x="602" y="142">45 µs</text>
   </g>
 
-  <!-- FastOrderBook: 41 / 42 / 56 ns -->
-  <polyline points="170,308 375,308 580,301" fill="none" stroke="#2d8f4e" stroke-width="3"/>
+  <!-- Indexed & Fast cancel p50: ~42-46 ns (both flat, essentially overlapping) -->
+  <polyline points="170,306 375,306 580,306" fill="none" stroke="#2d8f4e" stroke-width="3"/>
   <g fill="#2d8f4e">
-    <circle cx="170" cy="308" r="4.5"/><circle cx="375" cy="308" r="4.5"/><circle cx="580" cy="301" r="4.5"/>
+    <circle cx="170" cy="306" r="4.5"/><circle cx="375" cy="306" r="4.5"/><circle cx="580" cy="306" r="4.5"/>
   </g>
-  <g font-size="12" font-weight="700" fill="#1f6b39" text-anchor="middle">
-    <text x="170" y="324">41 ns</text><text x="375" y="320">42 ns</text><text x="600" y="317">56 ns</text>
-  </g>
+  <text x="602" y="310" font-size="12" font-weight="700" fill="#1f6b39" text-anchor="middle">~45 ns</text>
 
-  <!-- gap callout between the 200k points (y 150 vs 301) -->
-  <line x1="580" y1="158" x2="580" y2="293" stroke="#c9c9c9" stroke-width="1" stroke-dasharray="3 3"/>
-  <text x="620" y="230" font-size="12.5" font-weight="700" fill="#6b6b6b" text-anchor="middle">~820×</text>
+  <!-- gap callout between the 200k points (y 150 vs 306) -->
+  <line x1="580" y1="158" x2="580" y2="298" stroke="#c9c9c9" stroke-width="1" stroke-dasharray="3 3"/>
+  <text x="624" y="232" font-size="12.5" font-weight="700" fill="#6b6b6b" text-anchor="middle">~1000×</text>
 
   <!-- legend -->
   <g font-size="13">
     <rect x="110" y="98" width="14" height="4" rx="2" fill="#e8543f"/>
-    <text x="131" y="103" fill="#1b1b1b">Naive  std::map + std::list  (scans the book)</text>
+    <text x="131" y="103" fill="#1b1b1b">Naive  std::map + std::list  — O(n) scan</text>
     <rect x="110" y="118" width="14" height="4" rx="2" fill="#2d8f4e"/>
-    <text x="131" y="123" fill="#1b1b1b">Fast  ladder + pool + registry  (O(1) unlink)</text>
+    <text x="131" y="123" fill="#1b1b1b">Indexed &amp; Fast  — O(1)/O(log n), stays flat</text>
   </g>
 </svg>
