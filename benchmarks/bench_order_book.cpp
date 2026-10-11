@@ -270,6 +270,9 @@ int main(int argc, char** argv) {
     // argv[3] = core to pin to. Default 0: on a hybrid CPU (P + E cores) the
     // low-numbered cores are the fast P-cores, so pin there, not the last core.
     int core_req   = (argc > 3) ? std::stoi(argv[3]) : 0;
+    // argv[4] = which book to run (0 = all three; 1/2/3 = just that one). Used
+    // by perf.sh so `perf stat` can profile a single implementation in isolation.
+    int book_sel   = (argc > 4) ? std::stoi(argv[4]) : 0;
 
     // Pin to a core and calibrate the timer before measuring anything.
     int core = pin_to_core(core_req);
@@ -290,17 +293,17 @@ int main(int argc, char** argv) {
     std::vector<BenchOp> ops = generate(n, s);
 
     // Fresh book per run; pool pre-sized to n so grow() never fires mid-timing.
-    {
+    if (book_sel == 0 || book_sel == 1) {
         OrderBook oracle;
         Result r = run(oracle, ops);
         print_result("1. OrderBook  (naive: std::map + std::list, O(n) cancel scan)", r, n);
     }
-    {
+    if (book_sel == 0 || book_sel == 2) {
         IndexedOrderBook indexed;
         Result r = run(indexed, ops);
         print_result("2. IndexedOrderBook  (std::map + id index, O(log n) cancel)", r, n);
     }
-    {
+    if (book_sel == 0 || book_sel == 3) {
         FastOrderBook fast(MIN_PRICE, MAX_PRICE, TICK, n);
         Result r = run(fast, ops);
         print_result("3. FastOrderBook  (ladder + pool + intrusive list, O(1) cancel)", r, n);

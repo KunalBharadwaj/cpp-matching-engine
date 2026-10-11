@@ -259,6 +259,24 @@ A fast engine that fills wrong is worthless, so correctness is enforced first:
 Numbers are single-machine and directional, not promises — reproduce them on
 your own box with the command below.
 
+### Hardware profiling (`perf`)
+
+The latency tables show *that* the cache-friendly layout wins; `perf` shows
+*why*. [`benchmarks/perf.sh`](benchmarks/perf.sh) runs `perf stat` on a single
+book (cache-misses, branch-misses, IPC) and, with Brendan Gregg's FlameGraph
+scripts on `PATH`, emits a flamegraph:
+
+```sh
+sudo sysctl kernel.perf_event_paranoid=1     # once, to allow user counters
+benchmarks/perf.sh 200000 42 2 3             # book 3 = fast; 1 = naive, 2 = indexed
+```
+
+The mechanism the counters test: the ladder + pool should show a **lower
+cache-miss rate** than the `std::map` baseline — contiguous arrays vs.
+pointer-chased red-black-tree and list nodes — which is the root cause of the
+tighter tail above. (Not wired into CI: `perf` needs kernel performance-counter
+access that CI sandboxes don't grant.)
+
 ---
 
 ## Build & run
