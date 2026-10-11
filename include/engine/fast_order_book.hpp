@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vector>
+#include <unordered_map>
 #include <optional>
 #include <limits>
 #include <algorithm>
@@ -48,6 +49,12 @@ class FastOrderBook {
     // The object pool and its free list (free nodes are chained via `next`).
     std::vector<PoolNode> nodes;
     std::int32_t free_head{NIL};
+
+    // O(1) cancel registry. INVARIANT: an order_id maps to its pool index
+    // exactly while that order is resting in the book -- inserted on rest,
+    // erased on full fill or cancel. (A flat/open-addressing hash map would be
+    // a cache win over std::unordered_map; deferred to the Phase 4 perf pass.)
+    std::unordered_map<OrderId, std::int32_t> id_to_node;
 
     // INVARIANT: best_bid_idx = highest non-empty bid index (head != NIL), or
     // NIL; best_ask_idx = lowest non-empty ask index, or NIL. Every mutation
@@ -126,6 +133,7 @@ class FastOrderBook {
         std::int64_t idx = priceToIndex(order.price);
         assert(idx >= 0 && idx < static_cast<std::int64_t>(size));
         std::int32_t node = allocNode(order);          // may grow the pool
+        id_to_node[order.order_id] = node;             // now resting -> registered
         if (order.side == Side::Buy) {
             listPushBack(bid[idx], node);
             bid[idx].total_quantity += order.remaining_quantity;
@@ -158,6 +166,7 @@ class FastOrderBook {
             maker.remaining_quantity -= tradeable_quantity;
             level.total_quantity     -= tradeable_quantity;
             if (maker.remaining_quantity == 0) {
+                id_to_node.erase(maker.order_id);      // left the book
                 listUnlink(level, maker_idx);          // O(1) via prev/next
                 freeNode(maker_idx);
             }
@@ -232,32 +241,27 @@ public:
         return indexToPrice(best_ask_idx);
     }
 
-    // Still an O(active levels) scan per side -- but the unlink itself is now
-    // O(1). Phase 3 adds an OrderId -> node-index registry to make the whole
-    // cancel O(1).
+    // O(1): registry lookup -> O(1) unlink. We read side/price back off the
+    // node itself, so the registry only has to store the index.
     bool cancelOrder(OrderId order_id) {
-        for (std::int64_t i = 0; i < static_cast<std::int64_t>(size); i++) {
-            for (std::int32_t it = ask[i].head; it != NIL; it = nodes[it].next) {
-                if (nodes[it].order.order_id == order_id) {
-                    ask[i].total_quantity -= nodes[it].order.remaining_quantity;
-                    listUnlink(ask[i], it);
-                    freeNode(it);
-                    if (ask[i].head == NIL && i == best_ask_idx) advanceBestAsk();
-                    return true;
-                }
-            }
+        auto it = id_to_node.find(order_id);
+        if (it == id_to_node.end()) return false;      // not resting (never was, or already gone)
+
+        std::int32_t node = it->second;
+        Order& o = nodes[node].order;
+        std::int64_t idx = priceToIndex(o.price);
+
+        if (o.side == Side::Buy) {
+            bid[idx].total_quantity -= o.remaining_quantity;
+            listUnlink(bid[idx], node);
+            if (bid[idx].head == NIL && idx == best_bid_idx) advanceBestBid();
+        } else {
+            ask[idx].total_quantity -= o.remaining_quantity;
+            listUnlink(ask[idx], node);
+            if (ask[idx].head == NIL && idx == best_ask_idx) advanceBestAsk();
         }
-        for (std::int64_t i = 0; i < static_cast<std::int64_t>(size); i++) {
-            for (std::int32_t it = bid[i].head; it != NIL; it = nodes[it].next) {
-                if (nodes[it].order.order_id == order_id) {
-                    bid[i].total_quantity -= nodes[it].order.remaining_quantity;
-                    listUnlink(bid[i], it);
-                    freeNode(it);
-                    if (bid[i].head == NIL && i == best_bid_idx) advanceBestBid();
-                    return true;
-                }
-            }
-        }
-        return false;
+        freeNode(node);
+        id_to_node.erase(it);
+        return true;
     }
 };
