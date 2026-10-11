@@ -142,6 +142,45 @@ public:
         return (*ask.begin()).first;
     }
 
+    // Cancel-replace with a priority-preserving fast path. Returns false if no
+    // such order is resting. new_quantity == 0 is treated as a cancel.
+    bool modifyOrder(OrderId order_id, Price new_price, Quantity new_quantity,
+                     ExecutionSink& execution_sink) {
+        if (new_quantity == 0) return cancelOrder(order_id);
+
+        auto find_in = [&](auto& book) -> Order* {
+            for (auto& [price, queue] : book)
+                for (Order& ord : queue)
+                    if (ord.order_id == order_id) return &ord;
+            return nullptr;
+        };
+        Order* resting = find_in(bid);
+        if (!resting) resting = find_in(ask);
+        if (!resting) return false;
+
+        // Same price and smaller size -> shrink in place, keep queue position.
+        if (new_price == resting->price && new_quantity <= resting->remaining_quantity) {
+            resting->remaining_quantity = new_quantity;
+            return true;
+        }
+
+        // Otherwise lose priority: pull it and re-submit as a fresh GTC limit
+        // (which may now cross at the new price).
+        Side side = resting->side;
+        cancelOrder(order_id);
+        Order replacement{
+            .order_id = order_id,
+            .price = new_price,
+            .original_quantity = new_quantity,
+            .remaining_quantity = new_quantity,
+            .side = side,
+            .order_type = OrderType::Limit,
+            .time_in_force = TimeInForce::GTC,
+        };
+        process(replacement, execution_sink);
+        return true;
+    }
+
     // this will return true if found and deleted otherwise false
     bool cancelOrder(OrderId order_id) {
         for(auto level = ask.begin(); level != ask.end(); level++) {

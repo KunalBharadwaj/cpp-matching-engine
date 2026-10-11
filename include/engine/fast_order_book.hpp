@@ -275,6 +275,45 @@ public:
         return indexToPrice(best_ask_idx);
     }
 
+    // Cancel-replace with a priority-preserving fast path, O(1) via the
+    // registry. Returns false if no such order is resting; new_quantity == 0
+    // is treated as a cancel.
+    bool modifyOrder(OrderId order_id, Price new_price, Quantity new_quantity,
+                     ExecutionSink& execution_sink) {
+        if (new_quantity == 0) return cancelOrder(order_id);
+
+        auto it = id_to_node.find(order_id);
+        if (it == id_to_node.end()) return false;
+        std::int32_t node = it->second;
+        Order& o = nodes[node].order;
+
+        // Same price and smaller size -> shrink in place, keep queue position.
+        if (new_price == o.price && new_quantity <= o.remaining_quantity) {
+            std::int64_t idx = priceToIndex(o.price);
+            Quantity delta = o.remaining_quantity - new_quantity;
+            if (o.side == Side::Buy) bid[idx].total_quantity -= delta;
+            else                     ask[idx].total_quantity -= delta;
+            o.remaining_quantity = new_quantity;
+            return true;
+        }
+
+        // Otherwise lose priority: cancel (frees the node) then re-submit.
+        // Capture side first; `o` dangles after cancelOrder frees the node.
+        Side side = o.side;
+        cancelOrder(order_id);
+        Order replacement{
+            .order_id = order_id,
+            .price = new_price,
+            .original_quantity = new_quantity,
+            .remaining_quantity = new_quantity,
+            .side = side,
+            .order_type = OrderType::Limit,
+            .time_in_force = TimeInForce::GTC,
+        };
+        process(replacement, execution_sink);
+        return true;
+    }
+
     // O(1): registry lookup -> O(1) unlink. We read side/price back off the
     // node itself, so the registry only has to store the index.
     bool cancelOrder(OrderId order_id) {

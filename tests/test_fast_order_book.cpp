@@ -216,6 +216,59 @@ TEST(FastOrderBook, PoolGrowsBeyondInitialCapacity) {
     EXPECT_EQ(std::nullopt, book.getBestAsk());
 }
 
+TEST(FastOrderBook, ModifyReduceKeepsPriority) {
+    // id 1 is ahead of id 2 at price 100.
+    Order s1{ .order_id = 1, .price = 100, .original_quantity = 10,
+              .remaining_quantity = 10, .side = Side::Sell, .order_type = OrderType::Limit };
+    Order s2{ .order_id = 2, .price = 100, .original_quantity = 5,
+              .remaining_quantity = 5, .side = Side::Sell, .order_type = OrderType::Limit };
+
+    RecordingSink sink;
+    ExecutionSink& es = sink;
+    FastOrderBook book(MIN, MAX, TICK);
+    book.process(s1, es);
+    book.process(s2, es);
+
+    EXPECT_TRUE(book.modifyOrder(1, 100, 3, es));   // shrink 10 -> 3, same price
+
+    Order buy{ .order_id = 3, .price = 100, .original_quantity = 4,
+               .remaining_quantity = 4, .side = Side::Buy, .order_type = OrderType::Limit };
+    book.process(buy, es);
+
+    ASSERT_EQ(2u, sink.trades.size());
+    EXPECT_EQ(1u, sink.trades[0].maker);  EXPECT_EQ(3u, sink.trades[0].quantity);  // id1 still first
+    EXPECT_EQ(2u, sink.trades[1].maker);  EXPECT_EQ(1u, sink.trades[1].quantity);
+}
+
+TEST(FastOrderBook, ModifyPriceCrossesAndTrades) {
+    Order buy{ .order_id = 1, .price = 100, .original_quantity = 5,
+               .remaining_quantity = 5, .side = Side::Buy, .order_type = OrderType::Limit };
+    Order sell{ .order_id = 2, .price = 105, .original_quantity = 5,
+                .remaining_quantity = 5, .side = Side::Sell, .order_type = OrderType::Limit };
+
+    RecordingSink sink;
+    ExecutionSink& es = sink;
+    FastOrderBook book(MIN, MAX, TICK);
+    book.process(buy, es);
+    book.process(sell, es);
+    ASSERT_EQ(0u, sink.trades.size());
+
+    // Reprice the resting sell down to 100 -> cancel-replace now crosses.
+    EXPECT_TRUE(book.modifyOrder(2, 100, 5, es));
+    ASSERT_EQ(1u, sink.trades.size());
+    EXPECT_EQ(100, sink.trades[0].price);
+    EXPECT_EQ(5u, sink.trades[0].quantity);
+    EXPECT_EQ(std::nullopt, book.getBestBid());
+    EXPECT_EQ(std::nullopt, book.getBestAsk());
+}
+
+TEST(FastOrderBook, ModifyUnknownReturnsFalse) {
+    RecordingSink sink;
+    ExecutionSink& es = sink;
+    FastOrderBook book(MIN, MAX, TICK);
+    EXPECT_FALSE(book.modifyOrder(42, 100, 5, es));
+}
+
 TEST(FastOrderBook, DifferentialAgainstOracle) {
     std::mt19937_64 rng(12345);               // fixed seed -> reproducible failures
     std::uniform_int_distribution<Price>     price_dist(MIN, MAX);
@@ -228,14 +281,34 @@ TEST(FastOrderBook, DifferentialAgainstOracle) {
     FastOrderBook fast(MIN, MAX, TICK, /*pool_capacity=*/8);  // tiny -> forces grow()
     RecordingSink oracle_sink, fast_sink;
 
+    ExecutionSink& oes = oracle_sink;
+    ExecutionSink& fes = fast_sink;
     OrderId next_id = 1;
     for (int step = 0; step < 5000; ++step) {
-        if (action_dist(rng) < 2 && next_id > 1) {
+        int op = action_dist(rng);
+        if (op < 2 && next_id > 1) {
             // Cancel a (possibly already-gone) id; both books must agree.
             OrderId victim = std::uniform_int_distribution<OrderId>(1, next_id - 1)(rng);
             EXPECT_EQ(oracle.cancelOrder(victim), fast.cancelOrder(victim));
             EXPECT_EQ(oracle.getBestBid(), fast.getBestBid());
             EXPECT_EQ(oracle.getBestAsk(), fast.getBestAsk());
+            continue;
+        }
+        if (op == 2 && next_id > 1) {
+            // Modify a (possibly already-gone) id; cancel-replace may trade.
+            OrderId victim = std::uniform_int_distribution<OrderId>(1, next_id - 1)(rng);
+            Price np = price_dist(rng);
+            Quantity nq = qty_dist(rng);
+            std::size_t before = oracle_sink.trades.size();
+            ASSERT_EQ(before, fast_sink.trades.size());
+            EXPECT_EQ(oracle.modifyOrder(victim, np, nq, oes),
+                      fast.modifyOrder(victim, np, nq, fes));
+            ASSERT_EQ(oracle_sink.trades.size(), fast_sink.trades.size());
+            for (std::size_t i = before; i < oracle_sink.trades.size(); ++i)
+                EXPECT_EQ(oracle_sink.trades[i], fast_sink.trades[i]);
+            EXPECT_EQ(oracle.getBestBid(), fast.getBestBid());
+            EXPECT_EQ(oracle.getBestAsk(), fast.getBestAsk());
+            if (::testing::Test::HasFailure()) FAIL() << "modify divergence at step " << step;
             continue;
         }
 
