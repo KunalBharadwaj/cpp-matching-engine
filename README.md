@@ -47,6 +47,30 @@ not any single number — is the result.
 
 ---
 
+## Try it in 30 seconds
+
+```sh
+cmake -S . -B build && cmake --build build --target engine
+./build/engine
+```
+
+A narrated demo walks a live book through every operation — resting orders, a
+crossing limit, a market order sweeping levels, cancel, modify (both the
+priority-keeping reduce and the repricing cross), and IOC/FOK — printing the
+trades and the book ladder after each step:
+
+```
+[12] NEW  #9  BUY     4 @ 105  buy 4 @ 105: #7 (3) fills first, then #8 (1) -- priority proven
+      → TRADE     3 @ 105    (maker #7  taker #9)
+      → TRADE     1 @ 105    (maker #8  taker #9)
+           price    bid    ask
+             105             4
+        --------------------------
+        best bid -   best ask 105
+```
+
+---
+
 ## What it does
 
 Maintains an order book and matches incoming aggressive orders against resting

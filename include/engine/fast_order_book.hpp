@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cassert>
+#include <utility>
 #include "engine/order.hpp"
 #include "engine/trade.hpp"
 #include "engine/execution_sink.hpp"
@@ -273,6 +274,22 @@ public:
     std::optional<Price> getBestAsk() const {
         if (best_ask_idx == NIL) return std::nullopt;
         return indexToPrice(best_ask_idx);
+    }
+
+    // Read-only snapshot of up to max_levels price levels from the top of the
+    // given side, as (price, resting quantity), best first. For display/debug,
+    // not the hot path.
+    std::vector<std::pair<Price, Quantity>> depth(Side side, std::size_t max_levels) const {
+        std::vector<std::pair<Price, Quantity>> out;
+        if (side == Side::Buy) {
+            for (std::int64_t i = best_bid_idx; i >= 0 && out.size() < max_levels; --i)
+                if (bid[i].head != NIL) out.push_back({indexToPrice(i), bid[i].total_quantity});
+        } else {
+            for (std::int64_t i = best_ask_idx;
+                 i != NIL && i < static_cast<std::int64_t>(size) && out.size() < max_levels; ++i)
+                if (ask[i].head != NIL) out.push_back({indexToPrice(i), ask[i].total_quantity});
+        }
+        return out;
     }
 
     // Cancel-replace with a priority-preserving fast path, O(1) via the
