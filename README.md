@@ -274,11 +274,27 @@ sudo sysctl kernel.perf_event_paranoid=1     # once, to allow user counters
 benchmarks/perf.sh 200000 42 2 3             # book 3 = fast; 1 = naive, 2 = indexed
 ```
 
-The mechanism the counters test: the ladder + pool should show a **lower
-cache-miss rate** than the `std::map` baseline — contiguous arrays vs.
-pointer-chased red-black-tree and list nodes — which is the root cause of the
-tighter tail above. (Not wired into CI: `perf` needs kernel performance-counter
-access that CI sandboxes don't grant.)
+Measured (`cpu_core` P-core counters, i5-1235U, 200k ops, whole process):
+
+| book    |  cycles | IPC  | LLC references | branch-misses |
+|---------|--------:|-----:|---------------:|--------------:|
+| naive   | 10.8 B  | 0.35 |     45.9 M     |     7.7 M     |
+| indexed |  0.77 B | 1.37 |      1.5 M     |     2.2 M     |
+| fast    |  0.76 B | 1.35 |      1.7 M     |     1.8 M     |
+
+The O(n) scan is right there in hardware: the naive book burns **~14× the
+cycles** and touches **~27× the memory** of the indexed/fast books for the
+*same* 200k operations and the *same* trades, and runs at **0.35 IPC** — the
+CPU stalled ~65% of the time chasing pointers through scattered tree and list
+nodes. Removing the scan lifts IPC ~4×. (A subtlety worth knowing: the naive
+*miss rate* is actually lower, because its scan re-reads the same hot nodes —
+the story is the 27× reference *count* and the cycles, not the rate.)
+
+The finer indexed-vs-fast tail-latency gap isn't separable with whole-process
+`perf stat` — both spend only ~25 ms matching inside a ~270 ms process
+dominated by workload setup — so the latency percentiles above are the cleaner
+measure there. (Not wired into CI: `perf` needs kernel counter access CI
+sandboxes don't grant.)
 
 ---
 
