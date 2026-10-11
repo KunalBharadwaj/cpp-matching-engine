@@ -26,27 +26,28 @@ cmake --build build --target bench
 - **Counting sink** (no allocation) so we time the book, not bookkeeping.
 - **Identical trade count** across both books is printed as a cross-check.
 - **Release build, `-O3 -DNDEBUG`, no sanitizers.**
-- **Clock-read overhead is reported**: `steady_clock::now()` costs ~40 ns
-  here, which is the noise floor. The fast book's p50s (~70–100 ns) are close
-  to that floor, so its *true* op latency is smaller than the raw number — the
-  measurement is partly clock overhead, not book work.
+- **Clock-read overhead is reported** (measured each run): `steady_clock::now()`
+  costs ~20 ns here, which is the noise floor. The fast book's p50s (~50–90 ns)
+  are close to that floor, so its *true* op latency is smaller than the raw
+  number — the measurement is partly clock overhead, not book work.
 
 ## Numbers
 
 Machine: 12th Gen Intel Core i5-1235U · g++ 13.3 · Linux · `-O3 -DNDEBUG`.
-Headline run: `./build/bench 200000 42` (clock overhead ≈ 33 ns, both books
-booked 119,563 trades).
+Headline run: `./build/bench 200000 42` (clock overhead ≈ 18 ns, both books
+booked 119,563 trades). Latencies in nanoseconds.
 
-| op     | metric | OrderBook (oracle) | FastOrderBook | speedup |
-|--------|--------|-------------------:|--------------:|--------:|
-| add    | p50    |            195 ns  |       115 ns  |   1.7×  |
-| add    | p99    |          2,442 ns  |       449 ns  |   5.4×  |
-| cancel | p50    |         78,260 ns  |        73 ns  |  ~1070× |
-| cancel | p99    |        889,912 ns  |       479 ns  |  ~1860× |
-| modify | p50    |         89,875 ns  |        73 ns  |  ~1230× |
-| modify | p99    |      1,011,937 ns  |       559 ns  |  ~1810× |
+| op     | book   |    p50 |     p90 |     p99 |   p99.9 |
+|--------|--------|-------:|--------:|--------:|--------:|
+| add    | oracle |    112 |     199 |     389 |   2,431 |
+| add    | fast   |     86 |     178 |     306 |     469 |
+| cancel | oracle | 46,069 | 120,738 | 189,018 | 561,183 |
+| cancel | fast   |     56 |     135 |     290 |     529 |
+| modify | oracle | 51,623 | 125,263 | 189,555 | 541,061 |
+| modify | fast   |     55 |     167 |     364 |     598 |
 
-Overall throughput: **0.02 M ops/s (oracle) vs 5.13 M ops/s (fast) — ~250×.**
+Overall throughput: **0.06 M ops/s (oracle) vs 7.44 M ops/s (fast) — ~124×.**
+Cancel/modify are ~800× faster at the median and into four figures in the tail.
 
 ### Scaling (the real result)
 
@@ -55,9 +56,9 @@ O(book size) while the fast book's are O(1). `cancel` p50 and throughput:
 
 | ops     | oracle cancel p50 | fast cancel p50 | oracle thru | fast thru   |
 |---------|------------------:|----------------:|------------:|------------:|
-| 50,000  |         11,721 ns |           59 ns | 0.25 M/s    | 5.94 M/s    |
-| 100,000 |         34,491 ns |           70 ns | 0.08 M/s    | 5.19 M/s    |
-| 200,000 |         78,260 ns |           73 ns | 0.02 M/s    | 5.13 M/s    |
+| 50,000  |          4,773 ns |           41 ns | 0.50 M/s    | 8.67 M/s    |
+| 100,000 |         14,515 ns |           42 ns | 0.17 M/s    | 8.94 M/s    |
+| 200,000 |         46,069 ns |           56 ns | 0.06 M/s    | 7.44 M/s    |
 
 Oracle latency climbs ~linearly with the book; the fast book is flat.
 

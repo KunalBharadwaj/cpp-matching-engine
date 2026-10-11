@@ -98,7 +98,7 @@ static std::vector<BenchOp> generate(std::size_t n, std::uint64_t seed) {
 // ---- stats -----------------------------------------------------------------
 
 struct Dist {
-    std::uint64_t count = 0, p50 = 0, p99 = 0, p999 = 0, max = 0;
+    std::uint64_t count = 0, p50 = 0, p90 = 0, p99 = 0, p999 = 0, max = 0;
     double mean = 0.0;
 };
 
@@ -108,7 +108,7 @@ static Dist summarize(std::vector<std::uint64_t>& v) {
     if (v.empty()) return d;
     std::sort(v.begin(), v.end());
     auto at = [&](double p) { return v[static_cast<std::size_t>(p * (v.size() - 1))]; };
-    d.p50 = at(0.50); d.p99 = at(0.99); d.p999 = at(0.999); d.max = v.back();
+    d.p50 = at(0.50); d.p90 = at(0.90); d.p99 = at(0.99); d.p999 = at(0.999); d.max = v.back();
     unsigned long long sum = 0; for (auto x : v) sum += x;
     d.mean = static_cast<double>(sum) / v.size();
     return d;
@@ -185,10 +185,11 @@ static double clock_overhead_ns() {
 }
 
 static void print_dist(const char* label, const Dist& d) {
-    std::printf("  %-8s n=%-9llu mean=%7.1f  p50=%4llu  p99=%6llu  p99.9=%7llu  max=%8llu  (ns)\n",
+    std::printf("  %-8s n=%-9llu mean=%7.1f  p50=%4llu  p90=%5llu  p99=%6llu  p99.9=%7llu  max=%8llu  (ns)\n",
                 label,
                 static_cast<unsigned long long>(d.count), d.mean,
                 static_cast<unsigned long long>(d.p50),
+                static_cast<unsigned long long>(d.p90),
                 static_cast<unsigned long long>(d.p99),
                 static_cast<unsigned long long>(d.p999),
                 static_cast<unsigned long long>(d.max));

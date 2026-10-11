@@ -11,8 +11,8 @@ differential testing and measured against it.
 
 The point isn't just that it matches orders. It's that every performance
 decision is **deliberate, explained, and benchmarked**: O(1) cancel/modify
-turns out ~1000× faster than the naive book at a realistic workload, and the
-gap *grows with book depth* — exactly as the Big-O predicts.
+run ~800× faster at the median than the naive book at a realistic workload,
+and the gap *grows with book depth* — exactly as the Big-O predicts.
 
 > Single-threaded hot path · header-only engine · C++20 · GoogleTest ·
 > clean under AddressSanitizer + UBSan.
@@ -26,29 +26,34 @@ prices clustered around a mid) driven through both books on a 12th-gen
 Intel i5-1235U, g++ 13.3, `-O3 -DNDEBUG`. Both books produced the **same
 119,563 trades** — the benchmark cross-checks that.
 
-| Operation | Metric | Naive (`std::map`+`list`) | **Fast** (ladder+pool+intrusive list) | Speedup |
-|-----------|:------:|--------------------------:|--------------------------------------:|:-------:|
-| add       | p50    |                   195 ns  |                              **115 ns** |  1.7×   |
-| add       | p99    |                 2,442 ns  |                              **449 ns** |  5.4×   |
-| **cancel**| p50    |                78,260 ns  |                               **73 ns** | **~1070×** |
-| **cancel**| p99    |               889,912 ns  |                              **479 ns** | **~1860×** |
-| **modify**| p50    |                89,875 ns  |                               **73 ns** | **~1230×** |
-| modify    | p99    |             1,011,937 ns  |                              **559 ns** | ~1810×  |
+Full latency distribution (nanoseconds), both books, same run:
 
-**Throughput:** 0.02 M ops/s → **5.13 M ops/s** (~250×).
+| Operation | Book      |     p50 |      p90 |      p99 |    p99.9 |
+|-----------|-----------|--------:|---------:|---------:|---------:|
+| add       | naive     |     112 |      199 |      389 |    2,431 |
+| add       | **fast**  |  **86** |  **178** |  **306** |  **469** |
+| **cancel**| naive     |  46,069 |  120,738 |  189,018 |  561,183 |
+| **cancel**| **fast**  |  **56** |  **135** |  **290** |  **529** |
+| **modify**| naive     |  51,623 |  125,263 |  189,555 |  541,061 |
+| **modify**| **fast**  |  **55** |  **167** |  **364** |  **598** |
+
+**Throughput:** 0.06 M ops/s → **7.44 M ops/s** (~124×). Cancel and modify are
+the story — roughly **800× faster at the median and into four figures in the
+tail** — because the naive book scans (O(book size)) while the fast book
+unlinks in O(1). `add` is close (~1.3×): it was never the bottleneck.
 
 The headline speedup is not a fixed number — it *scales*, because the naive
 cancel/modify are O(book size) while the fast ones are O(1):
 
 <p align="center">
-  <img src="benchmarks/latency-scaling.svg" alt="Cancel latency vs. book size: the naive book climbs from 12µs to 78µs as the book deepens while the fast book stays flat near 60-73ns" width="680">
+  <img src="benchmarks/latency-scaling.svg" alt="Cancel latency vs. book size: the naive book climbs from 5µs to 46µs as the book deepens while the fast book stays flat near 40-56ns" width="680">
 </p>
 
 | Workload size | Naive cancel p50 | Fast cancel p50 | Naive throughput | Fast throughput |
 |:-------------:|-----------------:|----------------:|-----------------:|----------------:|
-| 50,000 ops    |        11,721 ns |         **59 ns** |      0.25 M ops/s |    **5.94 M ops/s** |
-| 100,000 ops   |        34,491 ns |         **70 ns** |      0.08 M ops/s |    **5.19 M ops/s** |
-| 200,000 ops   |        78,260 ns |         **73 ns** |      0.02 M ops/s |    **5.13 M ops/s** |
+| 50,000 ops    |         4,773 ns |         **41 ns** |      0.50 M ops/s |    **8.67 M ops/s** |
+| 100,000 ops   |        14,515 ns |         **42 ns** |      0.17 M ops/s |    **8.94 M ops/s** |
+| 200,000 ops   |        46,069 ns |         **56 ns** |      0.06 M ops/s |    **7.44 M ops/s** |
 
 The naive book degrades as it fills; the fast book is flat. That divergence —
 not any single number — is the result.
@@ -161,7 +166,7 @@ than 8-byte pointers keep the links small and reallocation-safe.
 
 A hash map from order id to pool index means cancel/modify go *straight* to the
 node and unlink in O(1) — no scanning. This is the single change behind the
-~1000× cancel/modify speedup.
+~800× cancel/modify speedup.
 
 **Honest note:** this uses `std::unordered_map` today. An open-addressing flat
 hash map (`ankerl::unordered_dense`, Abseil `flat_hash_map`) would cut the
@@ -202,10 +207,11 @@ A fast engine that fills wrong is worthless, so correctness is enforced first:
 - **Release build, `-O3 -DNDEBUG`, sanitizers off** — ASan inflates latency
   several-fold, so perf numbers never come from the test build.
 - **Clock overhead is reported and acknowledged.** A back-to-back
-  `steady_clock::now()` costs ~40 ns on this box — the noise floor. The fast
-  book's ~70 ns p50 sits just above it, so its *true* per-op latency is lower
-  than the raw figure; the measurement is partly the clock itself. (`rdtsc` or
-  batched timing would resolve below the floor — a roadmap item.)
+  `steady_clock::now()` costs ~20 ns on this box (measured each run) — the
+  noise floor. The fast book's ~55 ns p50 sits just above it, so its *true*
+  per-op latency is lower than the raw figure; the measurement is partly the
+  clock itself. (`rdtsc` or batched timing would resolve below the floor — a
+  roadmap item.)
 - **Deterministic & reproducible.** The workload is seeded, so a given
   `(num_ops, seed)` replays byte-identically — the same run every time, which
   is what makes the numbers above reproducible and any regression debuggable.
@@ -217,7 +223,7 @@ A fast engine that fills wrong is worthless, so correctness is enforced first:
 
 ### Interpreting the gap
 
-- **add** barely moves (~1.7× p50): both do O(1)/O(log n) placement plus a list
+- **add** barely moves (~1.3× p50): both do O(1)/O(log n) placement plus a list
   push. The ladder wins on cache locality and by avoiding tree rebalancing and
   per-node allocation, but `add` was never the bottleneck.
 - **cancel / modify** is where the design pays off. The naive book holds no
