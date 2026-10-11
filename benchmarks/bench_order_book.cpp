@@ -6,6 +6,18 @@
 //
 // Methodology notes live next to the code they justify.
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#include <sched.h>
+#include <unistd.h>
+#if defined(__x86_64__) || defined(__i386__)
+#include <x86intrin.h>
+#define HAVE_RDTSC 1
+#else
+#define HAVE_RDTSC 0
+#endif
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -21,6 +33,53 @@
 #include "engine/execution_sink.hpp"
 
 using Clock = std::chrono::steady_clock;
+
+// ---- high-resolution timing via the CPU timestamp counter ------------------
+// rdtsc reads the invariant TSC directly -- a few ns of overhead against the
+// ~25 ns of a steady_clock::now() call, so the per-op signal isn't drowned by
+// the timer. We serialize each read (lfence + rdtscp) so out-of-order
+// execution can't smear the window, and calibrate cycles->ns once at startup.
+
+static double g_ticks_per_ns = 1.0;   // set by calibrate_tsc(); == TSC GHz
+
+#if HAVE_RDTSC
+// Intel's recommended fencing: lfence before rdtsc (no earlier instruction
+// leaks into the window), rdtscp at the end (waits for the measured code to
+// retire) followed by lfence (nothing later leaks in).
+static inline std::uint64_t tsc_begin() {
+    _mm_lfence(); return __rdtsc();
+}
+static inline std::uint64_t tsc_end() {
+    unsigned aux; std::uint64_t t = __rdtscp(&aux); _mm_lfence(); return t;
+}
+static inline std::uint64_t to_ns(std::uint64_t ticks) {
+    return static_cast<std::uint64_t>(ticks / g_ticks_per_ns);
+}
+#else
+static inline std::uint64_t tsc_begin() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
+}
+static inline std::uint64_t tsc_end() { return tsc_begin(); }
+static inline std::uint64_t to_ns(std::uint64_t ns) { return ns; }  // already ns
+#endif
+
+// Busy-spin a fixed wall interval and divide elapsed TSC ticks by elapsed ns.
+static void calibrate_tsc() {
+#if HAVE_RDTSC
+    auto c0 = Clock::now(); std::uint64_t t0 = tsc_begin();
+    while (std::chrono::duration<double>(Clock::now() - c0).count() < 0.20) { /* spin */ }
+    std::uint64_t t1 = tsc_end(); auto c1 = Clock::now();
+    double ns = std::chrono::duration<double, std::nano>(c1 - c0).count();
+    g_ticks_per_ns = static_cast<double>(t1 - t0) / ns;
+#endif
+}
+
+// Pin this thread to one core so the scheduler can't migrate it mid-run (cache
+// reload + ragged tails). Returns the core, or -1 if the OS refused.
+static int pin_to_core(int core) {
+    cpu_set_t set; CPU_ZERO(&set); CPU_SET(core, &set);
+    return (sched_setaffinity(0, sizeof(set), &set) == 0) ? core : -1;
+}
 
 // Minimal sink: we are timing the book, not trade bookkeeping. No allocation,
 // no I/O -- just enough work that the compiler can't delete the trade.
@@ -134,27 +193,24 @@ static Result run(Book& book, const std::vector<BenchOp>& ops) {
         switch (op.kind) {
             case BenchOp::Kind::Add: {
                 Order o = op.order;                 // process() mutates remaining_quantity
-                auto t0 = Clock::now();
+                std::uint64_t t0 = tsc_begin();
                 book.process(o, sink);
-                auto t1 = Clock::now();
-                add_ns.push_back(static_cast<std::uint64_t>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()));
+                std::uint64_t t1 = tsc_end();
+                add_ns.push_back(to_ns(t1 - t0));
                 break;
             }
             case BenchOp::Kind::Cancel: {
-                auto t0 = Clock::now();
+                std::uint64_t t0 = tsc_begin();
                 book.cancelOrder(op.target);
-                auto t1 = Clock::now();
-                cancel_ns.push_back(static_cast<std::uint64_t>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()));
+                std::uint64_t t1 = tsc_end();
+                cancel_ns.push_back(to_ns(t1 - t0));
                 break;
             }
             case BenchOp::Kind::Modify: {
-                auto t0 = Clock::now();
+                std::uint64_t t0 = tsc_begin();
                 book.modifyOrder(op.target, op.new_price, op.new_qty, sink);
-                auto t1 = Clock::now();
-                modify_ns.push_back(static_cast<std::uint64_t>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()));
+                std::uint64_t t1 = tsc_end();
+                modify_ns.push_back(to_ns(t1 - t0));
                 break;
             }
         }
@@ -170,19 +226,18 @@ static Result run(Book& book, const std::vector<BenchOp>& ops) {
     return r;
 }
 
-// Rough cost of a single Clock::now() read -- the noise floor under which the
-// per-op numbers below cannot be trusted.
-static double clock_overhead_ns() {
+// Median cost of one back-to-back timer read -- the noise floor under which the
+// per-op numbers cannot be trusted. Measured with the same timer the run uses.
+static double timer_overhead_ns() {
     constexpr int N = 200'000;
     std::vector<std::uint64_t> d; d.reserve(N);
     for (int i = 0; i < N; ++i) {
-        auto a = Clock::now();
-        auto b = Clock::now();
-        d.push_back(static_cast<std::uint64_t>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count()));
+        std::uint64_t a = tsc_begin();
+        std::uint64_t b = tsc_end();
+        d.push_back(b - a);
     }
     std::sort(d.begin(), d.end());
-    return static_cast<double>(d[d.size() / 2]);   // median
+    return static_cast<double>(d[d.size() / 2]) / g_ticks_per_ns;   // ticks -> ns
 }
 
 static void print_dist(const char* label, const Dist& d) {
@@ -212,12 +267,25 @@ int main(int argc, char** argv) {
     // stress the fast book alone (it handles 1e6 in well under a second).
     std::size_t n   = (argc > 1) ? std::stoull(argv[1]) : 200'000;
     std::uint64_t s = (argc > 2) ? std::stoull(argv[2]) : 42;
+    // argv[3] = core to pin to. Default 0: on a hybrid CPU (P + E cores) the
+    // low-numbered cores are the fast P-cores, so pin there, not the last core.
+    int core_req   = (argc > 3) ? std::stoi(argv[3]) : 0;
+
+    // Pin to a core and calibrate the timer before measuring anything.
+    int core = pin_to_core(core_req);
+    calibrate_tsc();
 
     std::printf("workload: %zu ops, seed %llu, mid %lld +/- ~%.0f ticks\n",
                 n, static_cast<unsigned long long>(s),
                 static_cast<long long>(MID), SPREAD);
-    std::printf("clock overhead (median of back-to-back now()): %.1f ns\n\n",
-                clock_overhead_ns());
+#if HAVE_RDTSC
+    std::printf("timing: rdtsc (TSC ~%.3f GHz), overhead ~%.1f ns/op; ",
+                g_ticks_per_ns, timer_overhead_ns());
+#else
+    std::printf("timing: steady_clock, overhead ~%.1f ns/op; ", timer_overhead_ns());
+#endif
+    if (core >= 0) std::printf("pinned to core %d\n\n", core);
+    else           std::printf("NOT pinned (affinity refused)\n\n");
 
     std::vector<BenchOp> ops = generate(n, s);
 

@@ -22,25 +22,25 @@
   </g>
   <text x="375" y="388" font-size="12.5" fill="#9a9a9a" text-anchor="middle">workload size (operations) → book depth</text>
 
-  <!-- Naive OrderBook cancel p50: 6,302 / 12,914 / 44,856 ns -->
-  <polyline points="170,194 375,178 580,150" fill="none" stroke="#e8543f" stroke-width="3"/>
+  <!-- Naive OrderBook cancel p50: 3,720 / 10,644 / 35,178 ns -->
+  <polyline points="170,206 375,183 580,156" fill="none" stroke="#e8543f" stroke-width="3"/>
   <g fill="#e8543f">
-    <circle cx="170" cy="194" r="4.5"/><circle cx="375" cy="178" r="4.5"/><circle cx="580" cy="150" r="4.5"/>
+    <circle cx="170" cy="206" r="4.5"/><circle cx="375" cy="183" r="4.5"/><circle cx="580" cy="156" r="4.5"/>
   </g>
   <g font-size="12" font-weight="700" fill="#c33d2a" text-anchor="middle">
-    <text x="170" y="186">6 µs</text><text x="375" y="170">13 µs</text><text x="602" y="142">45 µs</text>
+    <text x="170" y="198">3.7 µs</text><text x="375" y="175">11 µs</text><text x="602" y="148">35 µs</text>
   </g>
 
-  <!-- Indexed & Fast cancel p50: ~42-46 ns (both flat, essentially overlapping) -->
-  <polyline points="170,306 375,306 580,306" fill="none" stroke="#2d8f4e" stroke-width="3"/>
+  <!-- Indexed & Fast cancel p50: ~22-30 ns (both flat, essentially overlapping) -->
+  <polyline points="170,319 375,319 580,319" fill="none" stroke="#2d8f4e" stroke-width="3"/>
   <g fill="#2d8f4e">
-    <circle cx="170" cy="306" r="4.5"/><circle cx="375" cy="306" r="4.5"/><circle cx="580" cy="306" r="4.5"/>
+    <circle cx="170" cy="319" r="4.5"/><circle cx="375" cy="319" r="4.5"/><circle cx="580" cy="319" r="4.5"/>
   </g>
-  <text x="602" y="310" font-size="12" font-weight="700" fill="#1f6b39" text-anchor="middle">~45 ns</text>
+  <text x="602" y="323" font-size="12" font-weight="700" fill="#1f6b39" text-anchor="middle">~25 ns</text>
 
-  <!-- gap callout between the 200k points (y 150 vs 306) -->
-  <line x1="580" y1="158" x2="580" y2="298" stroke="#c9c9c9" stroke-width="1" stroke-dasharray="3 3"/>
-  <text x="624" y="232" font-size="12.5" font-weight="700" fill="#6b6b6b" text-anchor="middle">~1000×</text>
+  <!-- gap callout between the 200k points (y 156 vs 319) -->
+  <line x1="580" y1="164" x2="580" y2="311" stroke="#c9c9c9" stroke-width="1" stroke-dasharray="3 3"/>
+  <text x="624" y="240" font-size="12.5" font-weight="700" fill="#6b6b6b" text-anchor="middle">~1200×</text>
 
   <!-- legend -->
   <g font-size="13">

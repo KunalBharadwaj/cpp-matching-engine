@@ -13,7 +13,7 @@ The point isn't just that it matches orders. It's that every performance
 decision is **deliberate, explained, and benchmarked against a *fair*
 baseline** — not a strawman. Removing an O(n) cancel scan is ~1000× (table
 stakes, and I say so); the cache-friendly data structures on top then buy
-~1.2× throughput and markedly tighter tail latency — the part that actually
+~1.3× throughput and markedly tighter tail latency — the part that actually
 matters in a low-latency system.
 
 > Single-threaded hot path · header-only engine · C++20 · GoogleTest ·
@@ -25,7 +25,8 @@ matters in a low-latency system.
 
 **Three** implementations of the same book, driven through one seeded workload
 (200,000 ops: ~70% adds / 15% cancels / 15% modifies, prices around a mid) on a
-12th-gen Intel i5-1235U, g++ 13.3, `-O3 -DNDEBUG`. All three are
+12th-gen Intel i5-1235U, g++ 13.3, `-O3 -DNDEBUG`, **pinned to a P-core and
+timed per-op with `rdtsc`** (timer overhead ~8 ns). All three are
 **differentially tested to emit identical trades** (119,563 here), so the
 numbers isolate the data structure and nothing else:
 
@@ -40,14 +41,14 @@ headline number. There are really two results:
 
 ### Result 1 — don't scan the book (naive → indexed)
 
-Cancel p50 drops **44,856 ns → 46 ns (~1000×)** just by keeping an id index
+Cancel p50 drops **35,178 ns → 30 ns (~1170×)** just by keeping an id index
 instead of scanning. This is the number that *looks* huge — but it's table
 stakes: any competent implementation does it. The naive book is a deliberately
 simple oracle, so I treat its O(n) cancel as the baseline, **not** as the win.
 The trap it avoids, as the book deepens:
 
 <p align="center">
-  <img src="benchmarks/latency-scaling.svg" alt="Cancel p50 vs book size: the naive O(n) scan climbs from 6µs to 45µs as the book grows, while the indexed and fast books stay flat near 45ns" width="680">
+  <img src="benchmarks/latency-scaling.svg" alt="Cancel p50 vs book size: the naive O(n) scan climbs from ~4µs to 35µs as the book grows, while the indexed and fast books stay flat near 25ns" width="680">
 </p>
 
 ### Result 2 — what the cache-friendly structures actually buy (indexed → fast)
@@ -59,14 +60,14 @@ which is what a low-latency system actually cares about:
 
 | op     | metric | Indexed (map + index) | **Fast** (ladder + pool) |  gain |
 |--------|--------|----------------------:|-------------------------:|------:|
-| add    | p50    |                113 ns |                **70 ns** | 1.6×  |
-| add    | p99    |                317 ns |               **245 ns** | 1.3×  |
-| cancel | p50    |                 46 ns |                **46 ns** |   —   |
-| cancel | p90    |                141 ns |                **97 ns** | 1.5×  |
-| cancel | p99    |                235 ns |               **179 ns** | 1.3×  |
-| modify | p90    |                201 ns |               **126 ns** | 1.6×  |
+| add    | p50    |                 84 ns |                **48 ns** | 1.75× |
+| add    | p99    |                260 ns |               **187 ns** | 1.4×  |
+| cancel | p50    |                 30 ns |                **28 ns** | ~tie  |
+| cancel | p90    |                104 ns |                **70 ns** | 1.5×  |
+| cancel | p99    |                183 ns |               **175 ns** | ~tie  |
+| modify | p90    |                160 ns |                **93 ns** | 1.7×  |
 
-**Throughput: 7.72 → 9.21 M ops/s (~1.2×).**
+**Throughput: 9.14 → 12.19 M ops/s (~1.3×).**
 
 Why: the contiguous ladder avoids the tree's pointer-chasing and rebalancing,
 the object pool removes a `malloc`/`free` per resting order, and the intrusive
@@ -218,8 +219,8 @@ A fast engine that fills wrong is worthless, so correctness is enforced first:
 
 - **Workload is pre-generated** into a vector before timing — generation cost
   is never inside the measured region.
-- **Each operation is timed individually** with `std::chrono::steady_clock`;
-  latencies land in a pre-reserved vector and are percentiled *after* the run.
+- **Each operation is timed individually** with `rdtsc` (see below); latencies
+  land in a pre-reserved vector and are percentiled *after* the run.
 - **Reported per op kind** (add / cancel / modify) — a blended mean would hide
   the cancel story, which is the whole point.
 - **Counting sink** (no allocation, no I/O) so the book is measured, not
@@ -227,20 +228,22 @@ A fast engine that fills wrong is worthless, so correctness is enforced first:
 - **Trade counts are cross-checked** across all three books every run.
 - **Release build, `-O3 -DNDEBUG`, sanitizers off** — ASan inflates latency
   several-fold, so perf numbers never come from the test build.
-- **Clock overhead is reported and acknowledged.** A back-to-back
-  `steady_clock::now()` costs ~20 ns on this box (measured each run) — the
-  noise floor. The fast book's ~55 ns p50 sits just above it, so its *true*
-  per-op latency is lower than the raw figure; the measurement is partly the
-  clock itself. (`rdtsc` or batched timing would resolve below the floor — a
-  roadmap item.)
+- **Timed with `rdtsc`, not `steady_clock`.** Per-op latency is read straight
+  from the CPU timestamp counter, serialized with `lfence`/`rdtscp` so
+  out-of-order execution can't smear the measured window, and calibrated to
+  nanoseconds against `steady_clock` once at startup. Its overhead is **~8 ns**
+  here — about a third of a `steady_clock::now()` call — so a ~28 ns cancel is
+  genuinely resolved instead of lost in timer noise. The overhead is measured
+  and printed every run.
+- **Pinned to a P-core** via `sched_setaffinity`, so the scheduler can't
+  migrate the thread mid-run (migration reloads caches and fattens the tail).
+  On this hybrid CPU that means a low-numbered P-core, *not* an E-core — pinning
+  to the last core would measure the slow cores. Turbo / frequency scaling is
+  still on, so absolute tails would tighten further on a fully isolated box
+  (`isolcpus`, fixed clock); the relative comparison is robust regardless.
 - **Deterministic & reproducible.** The workload is seeded, so a given
   `(num_ops, seed)` replays byte-identically — the same run every time, which
   is what makes the numbers above reproducible and any regression debuggable.
-- **Known limitation:** the thread is *not* pinned to a core and turbo /
-  frequency scaling is left on, so absolute latencies (especially the tails)
-  would tighten under `taskset` + a fixed clock on an isolated box. The
-  *relative* comparison — same machine, same workload, back to back — is robust
-  to this, and the asymptotic gap is the point regardless.
 
 ### Interpreting the gap
 
@@ -248,10 +251,10 @@ A fast engine that fills wrong is worthless, so correctness is enforced first:
   cancel/modify (~1000×), but it's an algorithmic correction any competent
   implementation makes, not a property of the fast data structures.
 - **indexed vs. fast** is the real test of the ladder + pool + intrusive list.
-  `cancel` median is a tie (both already ~O(1)); the fast book wins on `add`
-  (~1.6×), on throughput (~1.2×), and — most relevantly — on the **tail**
-  (cancel p90/p99), because contiguous memory, no per-order `malloc`, and no
-  tree rebalancing make its worst cases far less ragged than the map's.
+  `cancel` median is a tie (both already ~constant time); the fast book wins on
+  `add` (~1.75×), on throughput (~1.3×), and — most relevantly — on the **tail**
+  (cancel p90 104→70 ns), because contiguous memory, no per-order `malloc`, and
+  no tree rebalancing make its worst cases far less ragged than the map's.
 
 Numbers are single-machine and directional, not promises — reproduce them on
 your own box with the command below.
@@ -276,7 +279,8 @@ cmake --build build-asan --target unit_tests && ./build-asan/unit_tests
 # Benchmark (release-optimized)
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target bench
-./build/bench [num_ops] [seed]        # default: 200000 ops, seed 42
+./build/bench [num_ops] [seed] [core]   # default: 200000 ops, seed 42, core 0
+# e.g. ./build/bench 200000 42 2        # pin to core 2 (a P-core on hybrid CPUs)
 ```
 
 See [`benchmarks/RESULTS.md`](benchmarks/RESULTS.md) for the full output and
