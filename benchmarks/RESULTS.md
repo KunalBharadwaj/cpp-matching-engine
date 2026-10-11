@@ -34,19 +34,32 @@ cmake --build build --target bench
 ## Numbers
 
 Machine: 12th Gen Intel Core i5-1235U · g++ 13.3 · Linux · `-O3 -DNDEBUG`.
-Run: `./build/bench 200000 42` (clock overhead ≈ 43 ns).
+Headline run: `./build/bench 200000 42` (clock overhead ≈ 33 ns, both books
+booked 119,563 trades).
 
 | op     | metric | OrderBook (oracle) | FastOrderBook | speedup |
 |--------|--------|-------------------:|--------------:|--------:|
-| add    | p50    |            198 ns  |       146 ns  |   1.4×  |
-| add    | p99    |          1 359 ns  |       618 ns  |   2.2×  |
-| cancel | p50    |         76 330 ns  |        97 ns  |  ~790×  |
-| cancel | p99    |        581 523 ns  |       698 ns  |  ~830×  |
-| modify | p50    |         87 967 ns  |        97 ns  |  ~900×  |
-| modify | p99    |        621 162 ns  |       835 ns  |  ~740×  |
+| add    | p50    |            195 ns  |       115 ns  |   1.7×  |
+| add    | p99    |          2,442 ns  |       449 ns  |   5.4×  |
+| cancel | p50    |         78,260 ns  |        73 ns  |  ~1070× |
+| cancel | p99    |        889,912 ns  |       479 ns  |  ~1860× |
+| modify | p50    |         89,875 ns  |        73 ns  |  ~1230× |
+| modify | p99    |      1,011,937 ns  |       559 ns  |  ~1810× |
 
-Overall throughput: **0.03 M ops/s (oracle) vs 4.05 M ops/s (fast) — ~138×.**
-Both booked 119 563 trades.
+Overall throughput: **0.02 M ops/s (oracle) vs 5.13 M ops/s (fast) — ~250×.**
+
+### Scaling (the real result)
+
+The speedup grows with book depth, because the oracle's cancel/modify are
+O(book size) while the fast book's are O(1). `cancel` p50 and throughput:
+
+| ops     | oracle cancel p50 | fast cancel p50 | oracle thru | fast thru   |
+|---------|------------------:|----------------:|------------:|------------:|
+| 50,000  |         11,721 ns |           59 ns | 0.25 M/s    | 5.94 M/s    |
+| 100,000 |         34,491 ns |           70 ns | 0.08 M/s    | 5.19 M/s    |
+| 200,000 |         78,260 ns |           73 ns | 0.02 M/s    | 5.13 M/s    |
+
+Oracle latency climbs ~linearly with the book; the fast book is flat.
 
 ## Why the gap looks like this
 
