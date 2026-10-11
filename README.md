@@ -16,8 +16,8 @@ stakes, and I say so); the cache-friendly data structures on top then buy
 ~1.3× throughput and markedly tighter tail latency — the part that actually
 matters in a low-latency system.
 
-> Single-threaded hot path · header-only engine · C++20 · GoogleTest ·
-> clean under AddressSanitizer + UBSan.
+> Single-threaded matching · lock-free SPSC ingress seam · header-only · C++20 ·
+> GoogleTest · clean under ASan/UBSan, ring verified under ThreadSanitizer.
 
 ---
 
@@ -209,7 +209,10 @@ A fast engine that fills wrong is worthless, so correctness is enforced first:
   fills, market-into-empty-book, IOC dropping its remainder, FOK killing on
   insufficient liquidity, modify keeping vs. losing priority, cursor repair on
   cancel, object-pool growth under load.
-- **28 GoogleTests**, all green under `-fsanitize=address,undefined`.
+- **30 GoogleTests**, all green under `-fsanitize=address,undefined`. The
+  lock-free ring is additionally proven **race-free under ThreadSanitizer**
+  (`-DENABLE_TSAN=ON`): 2M cross-thread handoffs, asserting nothing is lost or
+  reordered.
 
 ---
 
@@ -279,6 +282,38 @@ access that CI sandboxes don't grant.)
 
 ---
 
+## Concurrency: a lock-free ingress seam
+
+A single-producer / single-consumer **lock-free ring**
+([`spsc_ring.hpp`](include/engine/spsc_ring.hpp)) connects an ingress thread to
+the matching thread, so neither takes a lock on the hot path. Monotonic 64-bit
+head/tail counters (masked only for indexing, so full/empty needs no sacrificed
+slot), `acquire`/`release` ordering for the handoff, and `alignas(64)` padding
+so the producer's `tail` writes don't false-share the consumer's `head` line.
+Verified race-free under ThreadSanitizer over 2M handoffs.
+
+[`bench_pipeline`](benchmarks/bench_pipeline.cpp) runs ingress → ring → matching
+across two pinned cores:
+
+| path                              | throughput  |
+|-----------------------------------|------------:|
+| 1. inline matching (1 thread)     | ~12 M ops/s |
+| 2. ring → matching (2 threads)    | ~8 M ops/s  |
+| 3. ring only, no matching         | ~30 M ops/s |
+
+The honest result — and the reason this is worth showing: the ring moves orders
+several times faster than matching consumes them (3), so it's **never** the
+bottleneck, yet the two-thread pipeline (2) is *slower* than inline (1).
+Producing on one core and consuming on another bounces the order data between
+caches, which the single-threaded path avoids. **For a single-instrument book,
+splitting ingress from matching buys lock-free decoupling and latency
+isolation, not throughput** — the throughput win from threads comes from
+sharding *instruments* across matching cores (the natural next step), not from
+pipelining one book. Measuring this, and explaining *why*, matters more than a
+number that happened to go up.
+
+---
+
 ## Build & run
 
 Requires CMake ≥ 3.20 and a C++20 compiler (tested on g++ 13.3). GoogleTest is
@@ -294,11 +329,16 @@ ctest --test-dir build --output-on-failure
 cmake -S . -B build-asan -DENABLE_SANITIZERS=ON
 cmake --build build-asan --target unit_tests && ./build-asan/unit_tests
 
-# Benchmark (release-optimized)
+# The lock-free ring under ThreadSanitizer (in a container, prefix: setarch -R)
+cmake -S . -B build-tsan -DENABLE_TSAN=ON
+cmake --build build-tsan --target unit_tests && ./build-tsan/unit_tests
+
+# Benchmarks (release-optimized)
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --target bench
-./build/bench [num_ops] [seed] [core]   # default: 200000 ops, seed 42, core 0
-# e.g. ./build/bench 200000 42 2        # pin to core 2 (a P-core on hybrid CPUs)
+cmake --build build --target bench bench_pipeline
+./build/bench [num_ops] [seed] [core]          # per-op latency, 3 books
+# e.g. ./build/bench 200000 42 2               # pin to core 2 (a P-core)
+./build/bench_pipeline [n] [seed] [prod] [cons]  # 2-thread ring pipeline
 ```
 
 See [`benchmarks/RESULTS.md`](benchmarks/RESULTS.md) for the full output and
@@ -318,8 +358,9 @@ include/engine/
   order_book.hpp         naive reference book (the oracle)
   indexed_order_book.hpp fair baseline: std::map + OrderId->location index
   fast_order_book.hpp    price ladder + object pool + intrusive list + registry
-tests/                   GoogleTest suites (incl. the differential tests)
-benchmarks/              bench harness + RESULTS.md
+  spsc_ring.hpp          single-producer/consumer lock-free ring (ingress seam)
+tests/                   GoogleTest suites (differential + SPSC cross-thread)
+benchmarks/              bench (latency) + bench_pipeline (threads) + perf.sh + RESULTS.md
 ```
 
 ---
@@ -331,10 +372,11 @@ In rough order of value:
 1. **Open-addressing flat hash** for the registry — the next constant-factor win.
 2. **Real NASDAQ ITCH replay** — swap synthetic flow for a real tape via an
    ITCH parser, so the numbers come from production order flow.
-3. **`rdtsc` / batched timing** to measure below the clock-read floor.
-4. Templated engine `run()` over book type to drive both through one loop.
-5. **Concurrency (stretch):** split ingress and matching across threads over an
-   SPSC lock-free ring buffer; multi-instrument sharding.
+3. **`perf` counters in the README** — cache-miss / branch-miss deltas behind
+   the tail-latency story (tooling is in [`benchmarks/perf.sh`](benchmarks/perf.sh)).
+4. **Multi-instrument sharding** — the real throughput win from threads: route
+   per-symbol order flow to independent matching cores (the ingress ring and
+   its ThreadSanitizer-clean handoff are already in place).
 
 ---
 

@@ -6,3 +6,4 @@ build-asan/
 
 # Ignore SPEC file that is for our reference
 matching-engine-spec.md
+build-tsan/
