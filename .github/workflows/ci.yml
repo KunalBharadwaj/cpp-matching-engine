@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y cmake g++
+
+      # Correctness: full suite under AddressSanitizer + UBSan.
+      - name: Configure (sanitizers)
+        run: cmake -S . -B build-asan -DENABLE_SANITIZERS=ON
+      - name: Build tests
+        run: cmake --build build-asan --target unit_tests -j
+      - name: Run tests
+        run: ctest --test-dir build-asan --output-on-failure
+
+      # Make sure the release demo + benchmark also build.
+      - name: Build release demo + benchmark
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --target engine bench -j
+
+      # Smoke-test the demo runs cleanly.
+      - name: Run demo
+        run: ./build/engine > /dev/null

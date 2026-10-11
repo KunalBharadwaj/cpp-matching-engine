@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="420" viewBox="0 0 760 420" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <!-- white card so it stays readable on light or dark GitHub themes -->
+  <rect x="0" y="0" width="760" height="420" rx="10" fill="#ffffff" stroke="#e3e3e3"/>
+
+  <text x="40" y="38" font-size="19" font-weight="700" fill="#1b1b1b">Cancel latency (p50): O(n) scan vs. O(1) registry</text>
+  <text x="40" y="60" font-size="13" fill="#6b6b6b">Median time to cancel a resting order as the book deepens. Log scale. Lower is better.</text>
+
+  <!-- plot area: x 90..660, y 80..340 -->
+  <!-- y gridlines per decade: 10ns..1ms -->
+  <g font-size="12" fill="#9a9a9a">
+    <line x1="90" y1="340" x2="660" y2="340" stroke="#ededed"/><text x="84" y="344" text-anchor="end">10 ns</text>
+    <line x1="90" y1="288" x2="660" y2="288" stroke="#ededed"/><text x="84" y="292" text-anchor="end">100 ns</text>
+    <line x1="90" y1="236" x2="660" y2="236" stroke="#ededed"/><text x="84" y="240" text-anchor="end">1 µs</text>
+    <line x1="90" y1="184" x2="660" y2="184" stroke="#ededed"/><text x="84" y="188" text-anchor="end">10 µs</text>
+    <line x1="90" y1="132" x2="660" y2="132" stroke="#ededed"/><text x="84" y="136" text-anchor="end">100 µs</text>
+    <line x1="90" y1="80"  x2="660" y2="80"  stroke="#ededed"/><text x="84" y="84"  text-anchor="end">1 ms</text>
+  </g>
+
+  <!-- x labels at 170 / 375 / 580 -->
+  <g font-size="12.5" fill="#6b6b6b" text-anchor="middle">
+    <text x="170" y="362">50k ops</text>
+    <text x="375" y="362">100k ops</text>
+    <text x="580" y="362">200k ops</text>
+  </g>
+  <text x="375" y="388" font-size="12.5" fill="#9a9a9a" text-anchor="middle">workload size (operations) → book depth</text>
+
+  <!-- Naive OrderBook: 11,721 / 34,491 / 78,260 ns  (y = 340 - (log10(v)-1)*52) -->
+  <polyline points="170,180 375,156 580,138" fill="none" stroke="#e8543f" stroke-width="3"/>
+  <g fill="#e8543f">
+    <circle cx="170" cy="180" r="4.5"/><circle cx="375" cy="156" r="4.5"/><circle cx="580" cy="138" r="4.5"/>
+  </g>
+  <g font-size="12" font-weight="700" fill="#c33d2a" text-anchor="middle">
+    <text x="170" y="172">12 µs</text><text x="375" y="148">34 µs</text><text x="602" y="130">78 µs</text>
+  </g>
+
+  <!-- FastOrderBook: 59 / 70 / 73 ns -->
+  <polyline points="170,300 375,296 580,295" fill="none" stroke="#2d8f4e" stroke-width="3"/>
+  <g fill="#2d8f4e">
+    <circle cx="170" cy="300" r="4.5"/><circle cx="375" cy="296" r="4.5"/><circle cx="580" cy="295" r="4.5"/>
+  </g>
+  <g font-size="12" font-weight="700" fill="#1f6b39" text-anchor="middle">
+    <text x="170" y="316">59 ns</text><text x="375" y="312">70 ns</text><text x="600" y="311">73 ns</text>
+  </g>
+
+  <!-- gap callout between the 200k points (y 138 vs 295) -->
+  <line x1="580" y1="146" x2="580" y2="287" stroke="#c9c9c9" stroke-width="1" stroke-dasharray="3 3"/>
+  <text x="620" y="220" font-size="12.5" font-weight="700" fill="#6b6b6b" text-anchor="middle">~1070×</text>
+
+  <!-- legend -->
+  <g font-size="13">
+    <rect x="110" y="98" width="14" height="4" rx="2" fill="#e8543f"/>
+    <text x="131" y="103" fill="#1b1b1b">Naive  std::map + std::list  (scans the book)</text>
+    <rect x="110" y="118" width="14" height="4" rx="2" fill="#2d8f4e"/>
+    <text x="131" y="123" fill="#1b1b1b">Fast  ladder + pool + registry  (O(1) unlink)</text>
+  </g>
+</svg>

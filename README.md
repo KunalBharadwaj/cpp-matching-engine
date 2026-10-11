@@ -1,5 +1,9 @@
 # Low-Latency Matching Engine (C++20)
 
+[![CI](https://github.com/KunalBharadwaj/cpp-matching-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/KunalBharadwaj/cpp-matching-engine/actions/workflows/ci.yml)
+![C++20](https://img.shields.io/badge/C%2B%2B-20-blue)
+![License: MIT](https://img.shields.io/badge/License-MIT-green)
+
 A single-instrument limit-order-book and matching engine with **price-time
 (FIFO) priority**, built twice: once the obvious, correct way, and once the
 fast way — then the fast build is proven identical to the correct one by
@@ -35,6 +39,10 @@ Intel i5-1235U, g++ 13.3, `-O3 -DNDEBUG`. Both books produced the **same
 
 The headline speedup is not a fixed number — it *scales*, because the naive
 cancel/modify are O(book size) while the fast ones are O(1):
+
+<p align="center">
+  <img src="benchmarks/latency-scaling.svg" alt="Cancel latency vs. book size: the naive book climbs from 12µs to 78µs as the book deepens while the fast book stays flat near 60-73ns" width="680">
+</p>
 
 | Workload size | Naive cancel p50 | Fast cancel p50 | Naive throughput | Fast throughput |
 |:-------------:|-----------------:|----------------:|-----------------:|----------------:|
@@ -144,6 +152,11 @@ grow and reallocate without dangling, and each link is 4 bytes instead of 8.
 **Doubly-**linked is a deliberate choice: it makes unlink **O(1)**, which is the
 hook the next change relies on.
 
+Layout is kept tight on purpose: `Order` is 40 bytes (the three one-byte enums
+— side, type, time-in-force — fit in the trailing padding, costing nothing),
+and a pool node is 48 bytes (`Order` + two 4-byte index links). Indices rather
+than 8-byte pointers keep the links small and reallocation-safe.
+
 ### 3. Order registry → `OrderId → pool index`
 
 A hash map from order id to pool index means cancel/modify go *straight* to the
@@ -193,6 +206,14 @@ A fast engine that fills wrong is worthless, so correctness is enforced first:
   book's ~70 ns p50 sits just above it, so its *true* per-op latency is lower
   than the raw figure; the measurement is partly the clock itself. (`rdtsc` or
   batched timing would resolve below the floor — a roadmap item.)
+- **Deterministic & reproducible.** The workload is seeded, so a given
+  `(num_ops, seed)` replays byte-identically — the same run every time, which
+  is what makes the numbers above reproducible and any regression debuggable.
+- **Known limitation:** the thread is *not* pinned to a core and turbo /
+  frequency scaling is left on, so absolute latencies (especially the tails)
+  would tighten under `taskset` + a fixed clock on an isolated box. The
+  *relative* naive-vs-fast comparison — same machine, same workload, back to
+  back — is robust to this, and the asymptotic gap is the point regardless.
 
 ### Interpreting the gap
 
@@ -264,3 +285,9 @@ In rough order of value:
 4. Templated engine `run()` over book type to drive both through one loop.
 5. **Concurrency (stretch):** split ingress and matching across threads over an
    SPSC lock-free ring buffer; multi-instrument sharding.
+
+---
+
+## License
+
+[MIT](LICENSE).
