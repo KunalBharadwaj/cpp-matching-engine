@@ -29,7 +29,7 @@ FetchContent_MakeAvailable(googletest)  # download + build it, expose its target
 
 enable_testing()               # turn on Cmake's test-runner (ctest)
 
-add_executable(unit_tests tests/test_types.cpp tests/test_order_book.cpp tests/test_engine.cpp)     # s SECOND executable, just for tests
+add_executable(unit_tests tests/test_types.cpp tests/test_order_book.cpp tests/test_engine.cpp tests/test_fast_order_book.cpp)     # s SECOND executable, just for tests
 target_include_directories(unit_tests PRIVATE include) # so tests can # include
 target_link_libraries(unit_tests PRIVATE GTest::gtest_main)  # link GTest + its default main
 

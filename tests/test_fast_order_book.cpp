@@ -1,0 +1,170 @@
+#include "gtest/gtest.h"
+#include <random>
+#include "engine/order.hpp"
+#include "engine/order_book.hpp"
+#include "engine/fast_order_book.hpp"
+#include "engine/recording_sink.hpp"
+
+// Price range for the ladder in these tests. The random generator below stays
+// strictly inside [MIN, MAX] so priceToIndex never goes out of bounds.
+static constexpr Price MIN = 1;
+static constexpr Price MAX = 1000;
+static constexpr Price TICK = 1;
+
+// --- Targeted scenarios (the same cases the oracle is tested on) -----------
+
+TEST(FastOrderBook, PartialFillRestsRemainder) {
+    Order sell{ .order_id = 1, .price = 100, .original_quantity = 10,
+                .remaining_quantity = 10, .side = Side::Sell, .order_type = OrderType::Limit };
+    Order buy{ .order_id = 2, .price = 100, .original_quantity = 4,
+               .remaining_quantity = 4, .side = Side::Buy, .order_type = OrderType::Limit };
+
+    RecordingSink sink;
+    ExecutionSink& es = sink;
+    FastOrderBook book(MIN, MAX, TICK);
+
+    book.process(sell, es);
+    book.process(buy, es);
+
+    ASSERT_EQ(1u, sink.trades.size());
+    EXPECT_EQ(1u, sink.trades[0].maker);
+    EXPECT_EQ(2u, sink.trades[0].taker);
+    EXPECT_EQ(100, sink.trades[0].price);
+    EXPECT_EQ(4u, sink.trades[0].quantity);
+    EXPECT_EQ(100, book.getBestAsk());        // 6 left resting
+    EXPECT_EQ(std::nullopt, book.getBestBid());
+}
+
+TEST(FastOrderBook, NoCrossBothRest) {
+    Order sell{ .order_id = 1, .price = 105, .original_quantity = 5,
+                .remaining_quantity = 5, .side = Side::Sell, .order_type = OrderType::Limit };
+    Order buy{ .order_id = 2, .price = 100, .original_quantity = 3,
+               .remaining_quantity = 3, .side = Side::Buy, .order_type = OrderType::Limit };
+
+    RecordingSink sink;
+    ExecutionSink& es = sink;
+    FastOrderBook book(MIN, MAX, TICK);
+
+    book.process(sell, es);
+    book.process(buy, es);
+
+    ASSERT_EQ(0u, sink.trades.size());
+    EXPECT_EQ(100, book.getBestBid());
+    EXPECT_EQ(105, book.getBestAsk());
+}
+
+TEST(FastOrderBook, MarketWalksMultipleLevels) {
+    Order sell1{ .order_id = 1, .price = 100, .original_quantity = 5,
+                 .remaining_quantity = 5, .side = Side::Sell, .order_type = OrderType::Limit };
+    Order sell2{ .order_id = 2, .price = 101, .original_quantity = 5,
+                 .remaining_quantity = 5, .side = Side::Sell, .order_type = OrderType::Limit };
+    Order buy{ .order_id = 3, .original_quantity = 8,
+               .remaining_quantity = 8, .side = Side::Buy, .order_type = OrderType::Market };
+
+    RecordingSink sink;
+    ExecutionSink& es = sink;
+    FastOrderBook book(MIN, MAX, TICK);
+
+    book.process(sell1, es);
+    book.process(sell2, es);
+    book.process(buy, es);
+
+    EXPECT_EQ(2u, sink.trades.size());
+    EXPECT_EQ(101, book.getBestAsk());        // level 100 drained, cursor advanced
+    EXPECT_EQ(std::nullopt, book.getBestBid());
+}
+
+TEST(FastOrderBook, MarketIntoEmptyBookDoesNothing) {
+    Order buy{ .order_id = 1, .original_quantity = 5,
+               .remaining_quantity = 5, .side = Side::Buy, .order_type = OrderType::Market };
+
+    RecordingSink sink;
+    ExecutionSink& es = sink;
+    FastOrderBook book(MIN, MAX, TICK);
+
+    book.process(buy, es);
+
+    EXPECT_EQ(0u, sink.trades.size());
+    EXPECT_EQ(std::nullopt, book.getBestAsk());
+    EXPECT_EQ(std::nullopt, book.getBestBid());
+}
+
+TEST(FastOrderBook, CancelRepairsCursor) {
+    Order sell{ .order_id = 1, .price = 100, .original_quantity = 5,
+                .remaining_quantity = 5, .side = Side::Sell, .order_type = OrderType::Limit };
+    RecordingSink sink;
+    ExecutionSink& es = sink;
+    FastOrderBook book(MIN, MAX, TICK);
+
+    book.process(sell, es);
+    EXPECT_EQ(100, book.getBestAsk());
+    EXPECT_TRUE(book.cancelOrder(1));
+    EXPECT_EQ(std::nullopt, book.getBestAsk());  // cursor must fall back to -1
+    EXPECT_FALSE(book.cancelOrder(999));
+}
+
+// --- Differential test: FastOrderBook must equal the OrderBook oracle -------
+
+namespace {
+// Apply one order to both books through separate sinks; assert the emitted
+// trades for THIS order match, then assert top-of-book agrees.
+void applyAndCompare(Order order,
+                     OrderBook& oracle, FastOrderBook& fast,
+                     RecordingSink& oracle_sink, RecordingSink& fast_sink) {
+    std::size_t before = oracle_sink.trades.size();
+    ASSERT_EQ(before, fast_sink.trades.size());
+
+    Order a = order, b = order;               // each book mutates remaining_quantity
+    ExecutionSink& oes = oracle_sink;
+    ExecutionSink& fes = fast_sink;
+    oracle.process(a, oes);
+    fast.process(b, fes);
+
+    ASSERT_EQ(oracle_sink.trades.size(), fast_sink.trades.size());
+    for (std::size_t i = before; i < oracle_sink.trades.size(); ++i) {
+        EXPECT_EQ(oracle_sink.trades[i], fast_sink.trades[i]);  // Trade::operator==
+    }
+    EXPECT_EQ(oracle.getBestBid(), fast.getBestBid());
+    EXPECT_EQ(oracle.getBestAsk(), fast.getBestAsk());
+}
+}  // namespace
+
+TEST(FastOrderBook, DifferentialAgainstOracle) {
+    std::mt19937_64 rng(12345);               // fixed seed -> reproducible failures
+    std::uniform_int_distribution<Price>     price_dist(MIN, MAX);
+    std::uniform_int_distribution<Quantity>  qty_dist(1, 20);
+    std::uniform_int_distribution<int>       side_dist(0, 1);
+    std::uniform_int_distribution<int>       action_dist(0, 9);  // ~20% cancels
+
+    OrderBook oracle;
+    FastOrderBook fast(MIN, MAX, TICK);
+    RecordingSink oracle_sink, fast_sink;
+
+    OrderId next_id = 1;
+    for (int step = 0; step < 5000; ++step) {
+        if (action_dist(rng) < 2 && next_id > 1) {
+            // Cancel a (possibly already-gone) id; both books must agree.
+            OrderId victim = std::uniform_int_distribution<OrderId>(1, next_id - 1)(rng);
+            EXPECT_EQ(oracle.cancelOrder(victim), fast.cancelOrder(victim));
+            EXPECT_EQ(oracle.getBestBid(), fast.getBestBid());
+            EXPECT_EQ(oracle.getBestAsk(), fast.getBestAsk());
+            continue;
+        }
+
+        Side side = side_dist(rng) ? Side::Buy : Side::Sell;
+        bool market = (action_dist(rng) == 0);   // occasional market order
+        Quantity q = qty_dist(rng);
+        Order order{
+            .order_id = next_id++,
+            .price = market ? 0 : price_dist(rng),
+            .original_quantity = q,
+            .remaining_quantity = q,
+            .side = side,
+            .order_type = market ? OrderType::Market : OrderType::Limit,
+        };
+        applyAndCompare(order, oracle, fast, oracle_sink, fast_sink);
+        if (::testing::Test::HasFailure()) {
+            FAIL() << "divergence at step " << step << " (order id " << order.order_id << ")";
+        }
+    }
+}
