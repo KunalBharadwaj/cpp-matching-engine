@@ -23,11 +23,15 @@ jobs:
         run: ctest --test-dir build-asan --output-on-failure
 
       # Make sure the release demo + benchmark also build.
-      - name: Build release demo + benchmarks
+      - name: Build release demo + benchmarks + gateway
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --target engine bench bench_pipeline -j
+          cmake --build build --target engine bench bench_pipeline gateway_server gateway_client -j
 
       # Smoke-test the demo runs cleanly.
       - name: Run demo
         run: ./build/engine > /dev/null
+
+      # End-to-end gateway smoke: server + client over a TCP socket.
+      - name: Gateway smoke
+        run: bash scripts/gateway_smoke.sh

@@ -44,6 +44,14 @@ target_include_directories(bench_pipeline PRIVATE include)
 target_compile_options(bench_pipeline PRIVATE -O3 -DNDEBUG)
 target_link_libraries(bench_pipeline PRIVATE Threads::Threads)
 
+# ---------------Order-entry gateway (TCP + binary protocol)---------------
+add_executable(gateway_server src/gateway_server.cpp)
+target_include_directories(gateway_server PRIVATE include)
+target_compile_options(gateway_server PRIVATE -O2)
+add_executable(gateway_client src/gateway_client.cpp)
+target_include_directories(gateway_client PRIVATE include)
+target_compile_options(gateway_client PRIVATE -O2)
+
 # ---------------Tests---------------
 include(FetchContent)          # enable Cmake's download-a-dependency feature
 FetchContent_Declare(
@@ -55,7 +63,7 @@ FetchContent_MakeAvailable(googletest)  # download + build it, expose its target
 
 enable_testing()               # turn on Cmake's test-runner (ctest)
 
-add_executable(unit_tests tests/test_types.cpp tests/test_order_book.cpp tests/test_engine.cpp tests/test_fast_order_book.cpp tests/test_indexed_order_book.cpp tests/test_spsc_ring.cpp tests/test_order_index_map.cpp tests/test_pro_rata.cpp)     # s SECOND executable, just for tests
+add_executable(unit_tests tests/test_types.cpp tests/test_order_book.cpp tests/test_engine.cpp tests/test_fast_order_book.cpp tests/test_indexed_order_book.cpp tests/test_spsc_ring.cpp tests/test_order_index_map.cpp tests/test_pro_rata.cpp tests/test_gateway.cpp)     # s SECOND executable, just for tests
 target_include_directories(unit_tests PRIVATE include) # so tests can # include
 find_package(Threads REQUIRED)                               # std::thread needs pthreads
 target_link_libraries(unit_tests PRIVATE GTest::gtest_main Threads::Threads)  # link GTest + its default main

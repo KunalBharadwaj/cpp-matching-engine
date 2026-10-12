@@ -16,8 +16,8 @@ stakes, and I say so); the cache-friendly data structures on top then buy
 ~1.3× throughput and markedly tighter tail latency — the part that actually
 matters in a low-latency system.
 
-> Single-threaded matching · lock-free SPSC ingress seam · header-only · C++20 ·
-> GoogleTest · clean under ASan/UBSan, ring verified under ThreadSanitizer.
+> Price-time / pro-rata matching · lock-free SPSC ingress · TCP order-entry
+> gateway · C++20 · ASan/UBSan clean, ring verified under ThreadSanitizer.
 
 ---
 
@@ -252,9 +252,10 @@ A fast engine that fills wrong is worthless, so correctness is enforced first:
   fills, market-into-empty-book, IOC dropping its remainder, FOK killing on
   insufficient liquidity, modify keeping vs. losing priority, cursor repair on
   cancel, object-pool growth under load.
-- **38 GoogleTests**, all green under `-fsanitize=address,undefined` — including
+- **45 GoogleTests**, all green under `-fsanitize=address,undefined` — including
   the flat hash map stress-tested against `std::unordered_map` over 200k random
-  ops, and the pro-rata allocation (split-by-size, leftover-lot, conservation).
+  ops, the pro-rata allocation (split-by-size, leftover-lot, conservation), and
+  the gateway's risk checks and fill routing.
   The lock-free ring is additionally proven **race-free under ThreadSanitizer**
   (`-DENABLE_TSAN=ON`): 2M cross-thread handoffs, asserting nothing is lost or
   reordered.
@@ -375,6 +376,46 @@ number that happened to go up.
 
 ---
 
+## Order-entry gateway
+
+The engine is also a **server you can connect to and trade against**.
+`gateway_server` is an **epoll** TCP gateway speaking a compact fixed-size
+**binary protocol**; every order passes **pre-trade risk checks** before it
+reaches the book, and execution reports are routed back to *both* sides of each
+trade.
+
+- **Wire protocol** ([`gateway.hpp`](include/engine/gateway.hpp)) — 32-byte
+  inbound (`NewOrder` / `Cancel`), 40-byte outbound (`Ack` / `Fill` / `Done` /
+  `Canceled` / `Reject`), fixed layout with `static_assert`-ed sizes.
+- **Pre-trade risk** at ingress — max order size (fat-finger guard), a price
+  band (collar), and a per-connection net-position limit that *reserves on
+  accept and releases on cancel*, so resting orders count toward exposure.
+  Rejected orders never touch the book.
+- **Transport vs. logic are separated** — all of the above lives in
+  `GatewayCore`, unit-tested with no sockets; `gateway_server.cpp` is just the
+  epoll shell that frames the protocol off each socket and writes replies.
+
+```sh
+cmake --build build --target gateway_server gateway_client
+./build/gateway_server 7001 &      # listen on 127.0.0.1:7001
+./build/gateway_client 7001        # scripted demo   (or: scripts/gateway_smoke.sh)
+```
+
+```
+>> NEW  SELL 100 @ 50
+>> NEW  BUY 10 @ 5000000 (out of band)
+>> NEW  BUY 60 @ 50 (crosses)
+>> CANCEL #1
+<< ACK   order #1  qty 100
+<< RJCT  order #2  (price-band)        <- pre-trade risk rejection
+<< FILL  order #3  60 @ 50  (vs #1)    <- execution report to the taker
+<< FILL  order #1  60 @ 50  (vs #3)    <- ...and to the resting maker
+<< DONE  order #3  qty 0
+<< CXLD  order #1  qty 0
+```
+
+---
+
 ## Build & run
 
 Requires CMake ≥ 3.20 and a C++20 compiler (tested on g++ 13.3). GoogleTest is
@@ -422,8 +463,11 @@ include/engine/
                          templated on matching policy (FIFO / pro-rata)
   order_index_map.hpp    flat open-addressing hash (backward-shift deletion)
   spsc_ring.hpp          single-producer/consumer lock-free ring (ingress seam)
-tests/                   GoogleTest suites (differential + SPSC cross-thread)
+  gateway.hpp            binary wire protocol + risk checks + exec-report routing
+src/                     demo + gateway_server (epoll) + gateway_client
+tests/                   GoogleTest suites (differential + SPSC + gateway)
 benchmarks/              bench (latency) + bench_pipeline (threads) + perf.sh + RESULTS.md
+scripts/                 gateway_smoke.sh
 ```
 
 ---
@@ -432,12 +476,9 @@ benchmarks/              bench (latency) + bench_pipeline (threads) + perf.sh + 
 
 In rough order of value:
 
-1. **Order-entry gateway** — a compact binary wire protocol over TCP (epoll),
-   with pre-trade risk checks (max order size, price bands, position limits) at
-   ingress, so it's a server you can connect to, not just a library.
-2. **Real NASDAQ ITCH replay** — swap synthetic flow for a real tape via an
+1. **Real NASDAQ ITCH replay** — swap synthetic flow for a real tape via an
    ITCH parser, so the numbers come from production order flow.
-3. **Multi-instrument sharding** — the real throughput win from threads: route
+2. **Multi-instrument sharding** — the real throughput win from threads: route
    per-symbol order flow to independent matching cores (the ingress ring and
    its ThreadSanitizer-clean handoff are already in place).
 
