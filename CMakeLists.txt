@@ -55,7 +55,7 @@ FetchContent_MakeAvailable(googletest)  # download + build it, expose its target
 
 enable_testing()               # turn on Cmake's test-runner (ctest)
 
-add_executable(unit_tests tests/test_types.cpp tests/test_order_book.cpp tests/test_engine.cpp tests/test_fast_order_book.cpp tests/test_indexed_order_book.cpp tests/test_spsc_ring.cpp tests/test_order_index_map.cpp)     # s SECOND executable, just for tests
+add_executable(unit_tests tests/test_types.cpp tests/test_order_book.cpp tests/test_engine.cpp tests/test_fast_order_book.cpp tests/test_indexed_order_book.cpp tests/test_spsc_ring.cpp tests/test_order_index_map.cpp tests/test_pro_rata.cpp)     # s SECOND executable, just for tests
 target_include_directories(unit_tests PRIVATE include) # so tests can # include
 find_package(Threads REQUIRED)                               # std::thread needs pthreads
 target_link_libraries(unit_tests PRIVATE GTest::gtest_main Threads::Threads)  # link GTest + its default main

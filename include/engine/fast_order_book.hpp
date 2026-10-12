@@ -33,12 +33,25 @@ struct PriceLevel {
     Quantity total_quantity{};
 };
 
+// Matching policies -- how a single price level is allocated when an aggressor
+// consumes it. Selected at compile time (zero runtime cost: the unused branch
+// is discarded by `if constexpr`).
+//   FIFO     : price-time priority -- oldest resting order fills first.
+//   Pro-rata : the fill is split across all resting orders at the level in
+//              proportion to their size (used by some futures markets); the
+//              few leftover lots go to the largest fractional remainders,
+//              ties broken by time priority.
+struct FifoMatch    { static constexpr bool pro_rata = false; };
+struct ProRataMatch { static constexpr bool pro_rata = true;  };
+
 // Phase 2 book: flat price ladder + object pool + intrusive FIFO.
 //   * ladder: bid[i]/ask[i] hold the orders at indexToPrice(i); O(1) price lookup.
 //   * pool:   one contiguous vector<PoolNode>; alloc/free = free-list pop/push,
 //             so there is no malloc on the hot path.
 //   * cursors: best_bid_idx/best_ask_idx replace what map::begin() gave the oracle.
-class FastOrderBook {
+//   * MatchPolicy: FifoMatch (default) or ProRataMatch.
+template <class MatchPolicy = FifoMatch>
+class FastOrderBookT {
     static constexpr std::int32_t NIL = -1;
 
     std::size_t size{};
@@ -147,9 +160,16 @@ class FastOrderBook {
         }
     }
 
+    // Dispatch to the compile-time-selected policy. The unused branch is
+    // discarded, so there is no runtime check or indirection.
+    void consumeLevel(Order& taker, PriceLevel& level, ExecutionSink& execution_sink) {
+        if constexpr (MatchPolicy::pro_rata) consumeLevelProRata(taker, level, execution_sink);
+        else                                 consumeLevelFifo(taker, level, execution_sink);
+    }
+
     // FIFO fill at one level. No allocation happens here, so the maker
     // reference into the pool stays valid for the whole call.
-    void consumeLevel(Order& taker, PriceLevel& level, ExecutionSink& execution_sink) {
+    void consumeLevelFifo(Order& taker, PriceLevel& level, ExecutionSink& execution_sink) {
         while (level.head != NIL && taker.remaining_quantity > 0) {
             std::int32_t maker_idx = level.head;
             Order& maker = nodes[maker_idx].order;
@@ -171,6 +191,66 @@ class FastOrderBook {
                 id_to_node.erase(maker.order_id);      // left the book
                 listUnlink(level, maker_idx);          // O(1) via prev/next
                 freeNode(maker_idx);
+            }
+        }
+    }
+
+    // One scratch entry per resting order while allocating a pro-rata fill.
+    struct ProRataEntry { std::int32_t idx; Quantity fill; Quantity rem; };
+    std::vector<ProRataEntry> prorata_scratch_;      // reused across calls, no per-call alloc
+    std::vector<std::uint32_t> prorata_order_;
+
+    // Pro-rata fill at one level: split the taker's quantity across all resting
+    // orders in proportion to their size.
+    void consumeLevelProRata(Order& taker, PriceLevel& level, ExecutionSink& execution_sink) {
+        if (level.head == NIL || taker.remaining_quantity == 0) return;
+
+        const Quantity Q = taker.remaining_quantity;
+        const Quantity T = level.total_quantity;
+        if (Q >= T) {                                  // full sweep == FIFO result
+            consumeLevelFifo(taker, level, execution_sink);
+            return;
+        }
+
+        // Pass 1: each order's floor share = floor(Q * size / T), and the
+        // division remainder (for allocating the few leftover lots).
+        prorata_scratch_.clear();
+        Quantity assigned = 0;
+        for (std::int32_t it = level.head; it != NIL; it = nodes[it].next) {
+            Quantity s = nodes[it].order.remaining_quantity;
+            unsigned __int128 qs = static_cast<unsigned __int128>(Q) * s;   // avoid 64-bit overflow
+            Quantity share = static_cast<Quantity>(qs / T);
+            Quantity rem   = static_cast<Quantity>(qs % T);
+            prorata_scratch_.push_back({it, share, rem});
+            assigned += share;
+        }
+        // Leftover lots (= Q - sum of floors, strictly < #orders) go to the
+        // largest remainders; stable_sort keeps time priority among ties. Each
+        // floor share is <= size-1 here (since Q < T), so +1 never over-fills.
+        Quantity leftover = Q - assigned;
+        if (leftover > 0) {
+            std::size_t k = prorata_scratch_.size();
+            prorata_order_.resize(k);
+            for (std::uint32_t i = 0; i < k; ++i) prorata_order_[i] = i;
+            std::stable_sort(prorata_order_.begin(), prorata_order_.end(),
+                [&](std::uint32_t a, std::uint32_t b) { return prorata_scratch_[a].rem > prorata_scratch_[b].rem; });
+            for (Quantity i = 0; i < leftover; ++i) prorata_scratch_[prorata_order_[i]].fill += 1;
+        }
+
+        // Apply in head (time) order so trade output is deterministic.
+        for (const ProRataEntry& e : prorata_scratch_) {
+            if (e.fill == 0) continue;
+            Order& maker = nodes[e.idx].order;
+            Trade trade{ .maker = maker.order_id, .taker = taker.order_id,
+                         .price = maker.price, .quantity = e.fill };
+            execution_sink.on_trade(trade);
+            maker.remaining_quantity -= e.fill;
+            taker.remaining_quantity -= e.fill;
+            level.total_quantity     -= e.fill;
+            if (maker.remaining_quantity == 0) {
+                id_to_node.erase(maker.order_id);
+                listUnlink(level, e.idx);
+                freeNode(e.idx);
             }
         }
     }
@@ -239,8 +319,8 @@ public:
 
     // pool_capacity pre-sizes the free list so steady-state inserts never
     // grow(). Pick it above the peak number of simultaneously-resting orders.
-    FastOrderBook(Price min_price, Price max_price, Price tick_size,
-                  std::size_t pool_capacity = (1u << 16))
+    FastOrderBookT(Price min_price, Price max_price, Price tick_size,
+                   std::size_t pool_capacity = (1u << 16))
         : size(static_cast<std::size_t>((max_price - min_price) / tick_size) + 1),
           min_price(min_price), max_price(max_price), tick_size(tick_size),
           bid(size), ask(size),
@@ -356,3 +436,8 @@ public:
         return true;
     }
 };
+
+// The default book is price-time (FIFO); existing code uses this name unchanged.
+using FastOrderBook    = FastOrderBookT<FifoMatch>;
+// Size-weighted pro-rata allocation within each price level.
+using ProRataOrderBook = FastOrderBookT<ProRataMatch>;

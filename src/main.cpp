@@ -133,6 +133,22 @@ int main() {
     send("FOK buy 4 @ 110: fully fillable -> executes",
          limit(15, Side::Buy, 110, 4, TimeInForce::FOK));
 
+    std::printf("--- 8. Pro-rata matching (alternative policy) ---------------\n");
+    {
+        ProRataOrderBook pbook(/*min*/1, /*max*/1000, /*tick*/1);
+        PrintingSink psink;
+        ExecutionSink& pes = psink;
+        std::printf("[*] rest two asks at 100: SELL 10 (#1), SELL 30 (#2)\n");
+        Order a = limit(1, Side::Sell, 100, 10);
+        Order b = limit(2, Side::Sell, 100, 30);
+        pbook.process(a, pes);
+        pbook.process(b, pes);
+        std::printf("[*] BUY 20 @ 100 -> split 5:15 by SIZE (price-time FIFO would be 10 then 10)\n");
+        Order c = limit(3, Side::Buy, 100, 20);
+        pbook.process(c, pes);
+    }
+    std::printf("\n");
+
     std::printf("Demo complete. See README.md for design + benchmarks.\n");
     return 0;
 }
