@@ -1,13 +1,13 @@
 #pragma once
 
 #include <vector>
-#include <unordered_map>
 #include <optional>
 #include <limits>
 #include <algorithm>
 #include <cstdint>
 #include <cassert>
 #include <utility>
+#include "engine/order_index_map.hpp"
 #include "engine/order.hpp"
 #include "engine/trade.hpp"
 #include "engine/execution_sink.hpp"
@@ -53,9 +53,10 @@ class FastOrderBook {
 
     // O(1) cancel registry. INVARIANT: an order_id maps to its pool index
     // exactly while that order is resting in the book -- inserted on rest,
-    // erased on full fill or cancel. (A flat/open-addressing hash map would be
-    // a cache win over std::unordered_map; deferred to the Phase 4 perf pass.)
-    std::unordered_map<OrderId, std::int32_t> id_to_node;
+    // erased on full fill or cancel. Flat open-addressing map (backward-shift
+    // deletion, no tombstones) -- contiguous, cache-friendly, no per-entry
+    // malloc, unlike std::unordered_map.
+    OrderIndexMap id_to_node;
 
     // INVARIANT: best_bid_idx = highest non-empty bid index (head != NIL), or
     // NIL; best_ask_idx = lowest non-empty ask index, or NIL. Every mutation
@@ -134,7 +135,7 @@ class FastOrderBook {
         std::int64_t idx = priceToIndex(order.price);
         assert(idx >= 0 && idx < static_cast<std::int64_t>(size));
         std::int32_t node = allocNode(order);          // may grow the pool
-        id_to_node[order.order_id] = node;             // now resting -> registered
+        id_to_node.insert(order.order_id, node);       // now resting -> registered
         if (order.side == Side::Buy) {
             listPushBack(bid[idx], node);
             bid[idx].total_quantity += order.remaining_quantity;
@@ -242,7 +243,9 @@ public:
                   std::size_t pool_capacity = (1u << 16))
         : size(static_cast<std::size_t>((max_price - min_price) / tick_size) + 1),
           min_price(min_price), max_price(max_price), tick_size(tick_size),
-          bid(size), ask(size) {
+          bid(size), ask(size),
+          id_to_node(4096) {    // small; auto-grows to ~2x PEAK LIVE orders, not
+                                // the pool capacity -- keeps the table cache-resident
         nodes.resize(pool_capacity);
         for (std::size_t i = pool_capacity; i-- > 0; ) {   // index 0 handed out first
             nodes[i].next = free_head;
@@ -299,9 +302,8 @@ public:
                      ExecutionSink& execution_sink) {
         if (new_quantity == 0) return cancelOrder(order_id);
 
-        auto it = id_to_node.find(order_id);
-        if (it == id_to_node.end()) return false;
-        std::int32_t node = it->second;
+        std::int32_t node = id_to_node.find(order_id);
+        if (node < 0) return false;
         Order& o = nodes[node].order;
 
         // Same price and smaller size -> shrink in place, keep queue position.
@@ -334,10 +336,9 @@ public:
     // O(1): registry lookup -> O(1) unlink. We read side/price back off the
     // node itself, so the registry only has to store the index.
     bool cancelOrder(OrderId order_id) {
-        auto it = id_to_node.find(order_id);
-        if (it == id_to_node.end()) return false;      // not resting (never was, or already gone)
+        std::int32_t node = id_to_node.find(order_id);
+        if (node < 0) return false;                    // not resting (never was, or already gone)
 
-        std::int32_t node = it->second;
         Order& o = nodes[node].order;
         std::int64_t idx = priceToIndex(o.price);
 
@@ -351,7 +352,7 @@ public:
             if (ask[idx].head == NIL && idx == best_ask_idx) advanceBestAsk();
         }
         freeNode(node);
-        id_to_node.erase(it);
+        id_to_node.erase(order_id);
         return true;
     }
 };

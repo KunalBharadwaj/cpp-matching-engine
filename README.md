@@ -186,12 +186,27 @@ than 8-byte pointers keep the links small and reallocation-safe.
 
 A hash map from order id to pool index means cancel/modify go *straight* to the
 node and unlink in O(1) — no scanning. (The `IndexedOrderBook` baseline does the
-same thing on a `std::map`, which is why the *honest* win over it is modest —
-see Results. The ~1000× over the naive scan is just not scanning.)
+same thing on a `std::map`; the ~1000× over the naive scan is just not scanning.)
 
-**Honest note:** this uses `std::unordered_map` today. An open-addressing flat
-hash map (`ankerl::unordered_dense`, Abseil `flat_hash_map`) would cut the
-constant further by being cache-friendlier; it's the first item on the roadmap.
+The registry is a **custom open-addressing flat hash map**
+([`order_index_map.hpp`](include/engine/order_index_map.hpp)): one contiguous
+array, linear probing, **backward-shift deletion** (Knuth 6.4R — no tombstones,
+so deletes never force a rehash and probe runs stay short). It replaced
+`std::unordered_map`; a controlled A/B (same machine, interleaved runs):
+
+| registry           | cancel p50 | cancel p90 | modify p50 |
+|--------------------|-----------:|-----------:|-----------:|
+| `std::unordered_map` |   ~38 ns |   ~90 ns   |   ~38 ns   |
+| flat (this)        | **~18 ns** | **~55 ns** | **~17 ns** |
+
+> **A wrong turn worth keeping in the story.** My first cut sized the table to
+> the order *pool* capacity, so a few thousand live entries were scattered
+> across an **8 MB** array — every lookup a cache miss, and it benchmarked
+> **~2.5× *slower*** than `unordered_map`. Sizing to the *live* set instead
+> (start small, auto-grow on load factor) made the table cache-resident and
+> turned the regression into the ~2× win above. A "faster" structure that
+> doesn't fit in cache isn't faster — which is exactly why every change gets
+> A/B'd, not assumed.
 
 ---
 
@@ -209,8 +224,9 @@ A fast engine that fills wrong is worthless, so correctness is enforced first:
   fills, market-into-empty-book, IOC dropping its remainder, FOK killing on
   insufficient liquidity, modify keeping vs. losing priority, cursor repair on
   cancel, object-pool growth under load.
-- **30 GoogleTests**, all green under `-fsanitize=address,undefined`. The
-  lock-free ring is additionally proven **race-free under ThreadSanitizer**
+- **34 GoogleTests**, all green under `-fsanitize=address,undefined` — including
+  the flat hash map stress-tested against `std::unordered_map` over 200k random
+  ops. The lock-free ring is additionally proven **race-free under ThreadSanitizer**
   (`-DENABLE_TSAN=ON`): 2M cross-thread handoffs, asserting nothing is lost or
   reordered.
 
@@ -374,6 +390,7 @@ include/engine/
   order_book.hpp         naive reference book (the oracle)
   indexed_order_book.hpp fair baseline: std::map + OrderId->location index
   fast_order_book.hpp    price ladder + object pool + intrusive list + registry
+  order_index_map.hpp    flat open-addressing hash (backward-shift deletion)
   spsc_ring.hpp          single-producer/consumer lock-free ring (ingress seam)
 tests/                   GoogleTest suites (differential + SPSC cross-thread)
 benchmarks/              bench (latency) + bench_pipeline (threads) + perf.sh + RESULTS.md
@@ -385,11 +402,13 @@ benchmarks/              bench (latency) + bench_pipeline (threads) + perf.sh + 
 
 In rough order of value:
 
-1. **Open-addressing flat hash** for the registry — the next constant-factor win.
-2. **Real NASDAQ ITCH replay** — swap synthetic flow for a real tape via an
+1. **Pluggable matching policy** — add pro-rata matching alongside price-time
+   FIFO behind a clean interface (a real exchange variant most clones skip).
+2. **Order-entry gateway** — a compact binary wire protocol over TCP (epoll),
+   with pre-trade risk checks (max order size, price bands, position limits) at
+   ingress, so it's a server you can connect to, not just a library.
+3. **Real NASDAQ ITCH replay** — swap synthetic flow for a real tape via an
    ITCH parser, so the numbers come from production order flow.
-3. **`perf` counters in the README** — cache-miss / branch-miss deltas behind
-   the tail-latency story (tooling is in [`benchmarks/perf.sh`](benchmarks/perf.sh)).
 4. **Multi-instrument sharding** — the real throughput win from threads: route
    per-symbol order flow to independent matching cores (the ingress ring and
    its ThreadSanitizer-clean handoff are already in place).
